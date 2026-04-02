@@ -60,7 +60,7 @@ The CMake build expects the following environment variables to be set:
   (set by sourcing `bin/thisroot.sh` from the ROOT build directory)
 - `BGENPATH=<path-to-bgen-source>`
 
-And We provide example environment setup scripts for both CPU and GPU versions of the code: `env.sh` and `env_gpu.sh`, located in `/GADO/env`, to set these environment variables.
+And We provide **example environment setup scripts** for both CPU and GPU versions of the code: `env.sh` and `env_gpu.sh`, located in `/GADO/env`, to set these environment variables.
 
 Before installing or running GADO, please edit these bash scripts to specify the correct paths to your dependencies. Once configured, you can initialize the environment by running:
 
@@ -69,23 +69,12 @@ source /path/to/env/env.sh        # CPU mode
 source /path/to/env/env_gpu.sh    # GPU mode
 ```
 
-If **OpenBLAS**, **LAPACKE**, or **HDF5 C++** are installed in non-standard locations, the `CMakeLists.txt` file may need to be modified accordingly. For example, you should add the following lines to your CMakeLists.txt file to specify the include directories and link the corresponding libraries for **OpenBLAS** and **LAPACKE**:
-```
-## OpenBLAS
-include_directories(AFTER /path/to/OpenBLAS_install/include/openblas)
-link_libraries(/path/to/OpenBLAS_install/lib64/libopenblas.so)
-
-## LAPACKE
-include_directories(AFTER /path/to/lapack_install/include)
-link_libraries(/path/to/lapack_install/lib64/liblapacke.so)
-```
-
 **Notes**: 
 - Depending on your system, library directories may be named lib or lib64.
 - Please verify paths carefully and update both env.sh and CMakeLists.txt if needed.
 - After modifying environment variables, always clean the build directory before recompiling:
 
-To build the project:
+**To build the project**:
 ```
 # Clone repository
 git clone https://github.com/dlin-lab/GADO
