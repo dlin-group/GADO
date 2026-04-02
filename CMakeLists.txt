@@ -11,8 +11,8 @@ link_libraries(-lgfortran)
 # The following parts may need to be modifie
 ############################################
 ## HDF5
-include_directories(AFTER /usr/include/hdf5/serial)
-link_directories(/usr/lib/x86_64-linux-gnu/hdf5/serial)
+include_directories(AFTER $ENV{HDF5PATH}/include)
+link_directories($ENV{HDF5PATH}/lib)
 link_libraries(libhdf5.so libhdf5_cpp.so)
 
 ## R
