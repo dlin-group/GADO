@@ -15,6 +15,7 @@ else
 fi
 
 
+export HDF5PATH=/path/to/hdf5_build
 export LD_LIBRARY_PATH=/path/to/hdf5_build/lib:$LD_LIBRARY_PATH
 export CFLAGS="-I/path/to/hdf5_build/include $CFLAGS"
 
