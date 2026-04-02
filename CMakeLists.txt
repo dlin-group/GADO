@@ -14,7 +14,6 @@ link_libraries(-lgfortran)
 include_directories(AFTER $ENV{HDF5PATH}/include)
 link_directories($ENV{HDF5PATH}/lib)
 link_libraries(libhdf5.so libhdf5_cpp.so)
-
 ## R
 include_directories(AFTER $ENV{RPATH}/lib64/R/include)
 include_directories(AFTER $ENV{RPATH}/lib64/R/library/Rcpp/include)
