@@ -69,7 +69,7 @@ source /path/to/env/env.sh        # CPU mode
 source /path/to/env/env_gpu.sh    # GPU mode
 ```
 
-If **OpenBLAS**, **LAPACKE**, or **HDF5 C++** are installed in non-standard locations, the `CMakeLists.txt` file may need to be modified accordingly. Let's take **OpenBLAS** and **LAPACKE** as an example, the user will need to add the following lines to `CMakeLists.txt` file:
+If **OpenBLAS**, **LAPACKE**, or **HDF5 C++** are installed in non-standard locations, the `CMakeLists.txt` file may need to be modified accordingly. For example, you should add the following lines to your CMakeLists.txt file to specify the include directories and link the corresponding libraries for **OpenBLAS** and **LAPACKE**:
 ```
 ## OpenBLAS
 include_directories(AFTER /path/to/OpenBLAS_install/include/openblas)
@@ -80,6 +80,10 @@ include_directories(AFTER /path/to/lapack_install/include)
 link_libraries(/path/to/lapack_install/lib64/liblapacke.so)
 ```
 
+**Notes**: 
+- Depending on your system, library directories may be named lib or lib64.
+- Please verify paths carefully and update both env.sh and CMakeLists.txt if needed.
+- After modifying environment variables, always clean the build directory before recompiling:
 
 To build the project:
 ```
