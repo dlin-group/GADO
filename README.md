@@ -60,9 +60,21 @@ The CMake build expects the following environment variables to be set:
   (set by sourcing `bin/thisroot.sh` from the ROOT build directory)
 - `BGENPATH=<path-to-bgen-source>`
 
-If **HDF5 C++**, **OpenBLAS**, or **LAPACKE** are installed in non-standard locations, the `CMakeLists.txt` file may need to be modified accordingly.
+And We provide **example environment setup scripts** for both CPU and GPU versions of the code: `env.sh` and `env_gpu.sh`, located in `/GADO/env`, to set these environment variables.
 
-To build the project:
+Before installing or running GADO, please edit these bash scripts to specify the correct paths to your dependencies. Once configured, you can initialize the environment by running:
+
+```
+source /path/to/env/env.sh        # CPU mode
+source /path/to/env/env_gpu.sh    # GPU mode
+```
+
+**Notes**: 
+- Depending on your system, library directories may be named lib or lib64.
+- Please verify paths carefully and update both env.sh and CMakeLists.txt if needed.
+- After modifying environment variables, always clean the build directory before recompiling:
+
+**To build the project**:
 ```
 # Clone repository
 git clone https://github.com/dlin-lab/GADO
@@ -80,14 +92,6 @@ make -j4
 
 Setting `USE_CUDA=OFF` runs GADO in CPU mode. To enable GPU acceleration, set `USE_CUDA=ON` if the CUDA toolkit and `nvcc` are available on your system. With GPU support enabled, the null model fitting step can be executed on the GPU.
 
-We provide example environment setup scripts for both CPU and GPU versions of the code: `env.sh` and `env_gpu.sh`, located in `/GADO/env`.
-
-Before running GADO, please edit these bash scripts to specify the correct paths to your dependencies. Once configured, you can initialize the environment by running:
-
-```
-source /path/to/env/env.sh        # CPU mode
-source /path/to/env/env_gpu.sh    # GPU mode
-```
 ---
 
 # Usage Guide

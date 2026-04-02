@@ -6,13 +6,16 @@ export LD_LIBRARY_PATH=/path/to/icu/source/lib:$LD_LIBRARY_PATH
 
 export LD_LIBRARY_PATH=/path/to/gsl/lib:$LD_LIBRARY_PATH
 
+export HDF5PATH=/path/to/hdf5_build
 export LD_LIBRARY_PATH=/path/to/hdf5_build/lib:$LD_LIBRARY_PATH
 export CFLAGS="-I/path/to/hdf5_build/include $CFLAGS"
 
-export LD_LIBRARY_PATH=/path/to/OpenBLAS_install/lib64:$LD_LIBRARY_PATH
+export OPENBLASPATH=/path/to/OpenBLAS_install
+export LD_LIBRARY_PATH=$OPENBLASPATH/lib64:$LD_LIBRARY_PATH
 export CFLAGS="-I/path/to/OpenBLAS_install/include/openblas $CFLAGS"
 
-export LD_LIBRARY_PATH=/path/to/lapack_install/lib64:$LD_LIBRARY_PATH
+export LAPACKEPATH=/path/to/lapack_install
+export LD_LIBRARY_PATH=$LAPACKEPATH/lib64:$LD_LIBRARY_PATH
 export CFLAGS="-I/path/to/lapack_install/include $CFLAGS"
 
 export RPATH=/path/to/R-4.4.1_build

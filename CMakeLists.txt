@@ -7,28 +7,40 @@ file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/data)
 
 link_libraries(-lgfortran)
 
-include_directories(AFTER /usr/include/hdf5/serial)
-link_directories(/usr/lib/x86_64-linux-gnu/hdf5/serial)
+
+# The following parts may need to be modifie
+############################################
+## HDF5
+include_directories(AFTER $ENV{HDF5PATH}/include)
+link_directories($ENV{HDF5PATH}/lib)
 link_libraries(libhdf5.so libhdf5_cpp.so)
-
-include_directories(AFTER $ENV{RPATH}/lib/R/include)
-include_directories(AFTER $ENV{RPATH}/lib/R/library/Rcpp/include)
-include_directories(AFTER $ENV{RPATH}/lib/R/library/RInside/include)
-link_directories($ENV{RPATH}/lib/R/lib)
+## R
+include_directories(AFTER $ENV{RPATH}/lib64/R/include)
+include_directories(AFTER $ENV{RPATH}/lib64/R/library/Rcpp/include)
+include_directories(AFTER $ENV{RPATH}/lib64/R/library/RInside/include)
+link_directories($ENV{RPATH}/lib64/R/lib)
 link_libraries(libR.so libRblas.so libRlapack.so)
-link_directories($ENV{RPATH}/lib/R/library/Rcpp/libs)
+link_directories($ENV{RPATH}/lib64/R/library/Rcpp/libs)
 link_libraries(Rcpp.so)
-link_directories($ENV{RPATH}/lib/R/library/RInside/lib)
+link_directories($ENV{RPATH}/lib64/R/library/RInside/lib)
 link_libraries(RInside.so)
-
+## ROOT
 include_directories(AFTER $ENV{ROOTSYS}/include)
 link_directories($ENV{ROOTSYS}/lib)
 link_libraries(-lCore -lImt -lRIO -lNet -lHist -lGraf -lGraf3d -lGpad -lROOTVecOps -lTree -lTreePlayer -lRint -lPostscript -lMatrix -lPhysics -lMathCore -lMathMore -lThread -lMultiProc -lROOTDataFrame -lRInterface -pthread -lm -ldl -rdynamic)
-
+## BGEN
 include_directories(AFTER $ENV{BGENPATH}/genfile/include)
 include_directories(AFTER $ENV{BGENPATH}/db/include)
-link_directories($ENV{BGENPATH}/build $ENV{BGENPATH}/build/db)
-link_libraries(libbgen.a libdb.a)
+include_directories(AFTER $ENV{BGENPATH}/3rd_party/sqlite3)
+link_directories($ENV{BGENPATH}/build $ENV{BGENPATH}/build/db $ENV{BGENPATH}/build/3rd_party/sqlite3)
+link_libraries(libbgen.a libdb.a libsqlite3.a)
+## OpenBLAS
+include_directories(AFTER $ENV{OPENBLASPATH}/include/openblas)
+link_libraries($ENV{OPENBLASPATH}/lib64/libopenblas.so)
+## LAPACKE
+include_directories($ENV{LAPACKEPATH}/include)
+link_libraries($ENV{LAPACKEPATH}/lib64/liblapacke.so)
+############################################
 
 link_directories(/usr/lib/x86_64-linux-gnu)
 link_libraries(libopenblas.so liblapacke.so libzstd.so libz.so)
