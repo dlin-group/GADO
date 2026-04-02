@@ -1,5 +1,0 @@
-#pragma once
-
-#if @USE_CUDA_LIB@ == 1
-#define __CUDA__ @USE_CUDA_LIB@
-#endif
