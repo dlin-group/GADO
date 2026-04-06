@@ -66,15 +66,14 @@ GADO requires the following dependencies:
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/dlin-lab/GADO
-cd GADO
+git clone https://github.com/dlin-group/GADO
 ```
 
 ### 2. Install dependencies
 
 We provide a helper script to install required dependencies:
 ```
-bash /path/to/GADO/install.sh
+bash ./GADO/install.sh
 ```
 
 **Important Notes**:
@@ -96,8 +95,8 @@ The CMake build expects the following environment variables to be set:
 And we provide **example environment setup scripts** for both CPU and GPU versions of the code: `env.sh` and `env_gpu.sh`, located in `/GADO/env`, to set these environment variables. Before installing or running GADO, please edit these bash scripts to specify the correct paths to your dependencies. Once configured, you can initialize the environment by running:
 
 ```
-source /path/to/GADO/env/env.sh        # CPU mode
-source /path/to/GADO/env/env_gpu.sh    # GPU mode
+source ./GADO/env/env.sh        # CPU mode
+source ./GADO/env/env_gpu.sh    # GPU mode
 ```
 
 **Important Notes**:
