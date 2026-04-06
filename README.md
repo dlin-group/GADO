@@ -65,8 +65,13 @@ We provide a helper script to install required dependencies:
 bash /path/to/GADO/install.sh
 ```
 
-**Important: You need to edit install.sh to match your system paths.**
-
+**Important Notes**:
+- You may need to edit `install.sh` to match your system paths.
+- Some dependencies may already be available on your system. In that case, you can modify `install.sh` to skip reinstalling them.
+- If you use existing system dependencies, make sure to also update the corresponding paths in:
+  - `CMakeLists.txt`
+  - `env.sh` / `env_gpu.sh`
+  
 ### 3. Set environment variables
 
 The CMake build expects the following environment variables to be set:
@@ -83,10 +88,11 @@ source /path/to/GADO/env/env.sh        # CPU mode
 source /path/to/GADO/env/env_gpu.sh    # GPU mode
 ```
 
-**Important**: 
-- Depending on your system, library directories may be named lib or lib64.
-- Please verify paths carefully and update both env.sh and CMakeLists.txt if needed.
-- After modifying environment variables, always clean the build directory before recompiling:
+**Important Notes**:
+- Depending on your system, library directories may be named `lib` or `lib64`.
+- Please verify all paths carefully and update both `env.sh` / `env_gpu.sh` and `CMakeLists.txt` if needed.
+- After modifying environment variables or dependencies, always clean the build directory before recompiling.
+- Make sure to source `env.sh` or `env_gpu.sh` every time before building or running GADO.
 
 ### 4. Build the project
 ```
@@ -101,7 +107,7 @@ cmake -DUSE_CUDA=<OFF|ON> ../GADO
 make -j4
 ```
 
-Setting `USE_CUDA=OFF` runs GADO in CPU mode. To enable GPU acceleration, set `USE_CUDA=ON` if the CUDA toolkit and `nvcc` are available on your system. With GPU support enabled, the null model fitting step can be executed on the GPU.
+Setting `USE_CUDA=OFF` runs GADO in CPU mode. To enable GPU acceleration, set `USE_CUDA=ON` if the `CUDA toolkit` and `nvcc` are available on your system. With GPU support enabled, the null model fitting step can be executed on the GPU.
 
 ---
 
