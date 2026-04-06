@@ -29,10 +29,18 @@ If you use GADO in your research, please cite:
 GADO requires the following dependencies:
 
 - [HDF5 C++](https://docs.hdfgroup.org/archive/support/HDF5/doc1.8/cpplus_RM/index.html)
+  - Should be configured with `--enable-cxx --enable-shared`
 - [OpenBLAS](https://www.openblas.net/)
+  - Make should be configured with:
+      - `NOFORTRAN=1`
+      - `NO_LTO=1`
+      - `USE_OPENMP=1`
 - [LAPACKE](https://www.netlib.org/lapack/lapacke.html)
+  - CMake should be configured with:
+    - `-DBUILD_SHARED_LIBS=ON`
+    - `-DLAPACKE=ON`
 - [R](https://www.r-project.org/)
-  - Must be configured with `--enable-R-shlib`
+  - Should be configured with `--enable-R-shlib --with-blas="/path/to/libopenblas.so" --with-lapack`
   - The following R packages must be installed:
     - [Rcpp](https://cran.r-project.org/web/packages/Rcpp/index.html)
     - [RInside](https://cran.r-project.org/web/packages/RInside/index.html)
@@ -40,10 +48,14 @@ GADO requires the following dependencies:
     - [optparse](https://cran.r-project.org/web/packages/optparse/index.html)
     - [Matrix](https://cran.r-project.org/web/packages/Matrix/index.html)
     - [hdf5r](https://hhoeflin.github.io/hdf5r/)
+    - [igraph](https://cloud.r-project.org/web/packages/igraph/index.html)
 - [ROOT](https://root.cern/)
   - CMake should be configured with:
     - `-Dr=ON`
     - `-DR_DIR=<path-to-R-build>`
+    - `-Dbuiltin_glew=ON`
+    - `-Dssl=OFF`
+    - `-Dgsl=ON`
 - [BGEN](https://enkre.net/cgi-bin/code/bgen)
 - Optional: [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit)
 
@@ -104,6 +116,7 @@ cd GADO_build
 cmake -DUSE_CUDA=<OFF|ON> ../GADO
 
 # Compile
+# if you have 4 cores available for compilation
 make -j4
 ```
 
