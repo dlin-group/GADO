@@ -1,70 +1,87 @@
 library(Matrix)
 library(hdf5r)
 library(optparse)
+library(igraph)
 
+# =========================
+# CLI
+# =========================
 options = list(
-  make_option(c("-i", "--input"), type="character", default=NULL,
-              help="full path to input file", metavar="character"),
-  make_option(c("-o", "--output"), type="character", default=NULL,
-              help="full path to output file", metavar="character"),
-  make_option(c("-m", "--matrix"), type="character", default=NULL,
-              help="matrix name in R environment", metavar="character"))
+  make_option(c("-i", "--input"), type="character", default=NULL),
+  make_option(c("-o", "--output"), type="character", default=NULL),
+  make_option(c("-m", "--matrix"), type="character", default=NULL)
+)
+
 parser = OptionParser(option_list=options)
 opt = parse_args(parser)
 
 if(is.null(opt$input) || is.null(opt$output) || is.null(opt$matrix)){
   print_help(parser)
-  stop("Must give input and output file paths and matrix name", call.=False)
+  stop("Must give input/output/matrix", call.=FALSE)
 }
 
-load(file.path(opt$input), env <- new.env())
-grm = env[[opt$matrix]]
+# =========================
+# Load GRM
+# =========================
+env <- new.env()
+load(opt$input, envir = env)
+sGRM <- env[[opt$matrix]]
 
-# get the start and end index of each block
-d = diff(grm@p)
-bli = rep(0, length(d))
-blj = rep(0, length(d))
-maxbl = 0
-index = 0
-hist = rep(0, 10000)
-for(i in 1:length(d)){
-    if(index == 0){
-        index = index + 1
-        bli[index] = i
-    }
-    else if(i == length(d)) blj[index] = i
-    else if(d[i+1] <= d[i]){
-	blj[index] = i
-	hist[blj[index]-bli[index]+1] = hist[blj[index]-bli[index]+1] + 1
-	maxbl = max(maxbl, blj[index] - bli[index] + 1)
-	index = index + 1
-	bli[index] = i+1
-    }
-}
-maxbl = max(maxbl, blj[index] - bli[index] + 1)
-print(sprintf("max block dim = %d", maxbl))
-for(i in 1:length(hist)){
-    if(hist[i] > 0) print(sprintf("%d, %d,", i, hist[i]))
+cat("Matrix dim:", dim(sGRM), "\n")
+
+# =========================
+# 2) block detection
+# =========================
+g <- graph_from_adjacency_matrix((sGRM != 0), mode = "undirected", diag = FALSE)
+
+comp <- components(g)
+membership <- comp$membership
+
+blk_ids <- sort(unique(membership))
+B <- length(blk_ids)
+
+cat("Detected blocks:", B, "\n")
+
+block_list <- lapply(blk_ids, function(b) which(membership == b))
+block_sizes <- vapply(block_list, length, integer(1))
+
+if (file.exists(opt$output)) file.remove(opt$output)
+
+h5 <- H5File$new(opt$output, mode = "w")
+
+block_info <- data.frame(
+  block_id = integer(),
+  size = integer()
+)
+
+for (i in seq_len(B)) {
+
+  if ((i-1) %% 1000 == 0) {
+    cat(sprintf("%d of %d\n", i-1, B))
+    flush.console()
+  }
+
+  rows <- block_list[[i]]
+
+  sub <- as.matrix(sGRM[rows, rows])
+
+  ds_name <- sprintf("block_%d", i - 1L)
+  h5[[ds_name]] <- sub
+
+  block_info <- rbind(block_info,
+                      data.frame(
+                        block_id = i - 1L,
+                        size     = length(rows)
+                      ))
 }
 
-# write the blocks to an hdf5 file
-x = grm@x
-p = grm@p
-minrc = 1.0
-file.h5 <- H5File$new(opt$output, mode="w")
-for(i in 1:index){
-    if((i-1) %% 1000 == 0) print(sprintf("%d of %d", i-1, index))
-    n = blj[i] - bli[i] + 1
-    m = matrix(rep(0.0, n*n), nrow=n, ncol=n)
-    for(j in 1:n){
-        for(k in 1:j){
-            m[j,k] = 2*x[p[bli[i]+j-1]+k]
-	    if(j != k) m[k,j] = m[j,k]
-	    if(abs(m[j,k]) > 0.0) minrc = min(minrc, abs(m[j,k]))
-        }
-    }
-    file.h5[[sprintf("block_%d", i-1)]] <- m
-}
-file.h5$close_all()
-print(sprintf("min rel coeff = %f", minrc))
+h5[["sample.id"]] <- rownames(sGRM)
 
+
+h5[["block.info"]] <- as.matrix(block_info)
+
+h5$close_all()
+
+cat("Wrote H5:", opt$output, "\n")
+cat("Total samples:", nrow(sGRM), "\n")
+cat("Max block size:", max(block_sizes), "\n")
