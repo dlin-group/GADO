@@ -1,7 +1,7 @@
 ########################################
 # Need to be modified
 ########################################
-export INSTALL_DIR=${1:-"/proj/dlin_lab/projects/GADO_sw/GADO/thirdParty"}
+export INSTALL_DIR=${1:-"/path/to/GADO/thirdParty"}
 ########################################
 
 export LD_LIBRARY_PATH=$INSTALL_DIR/readline_build/lib:$LD_LIBRARY_PATH
