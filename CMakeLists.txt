@@ -8,22 +8,18 @@ file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/data)
 link_libraries(-lgfortran)
 
 
-# The following parts may need to be modifie
+# The following parts may need to be modified
 ############################################
 ## HDF5
 include_directories(AFTER $ENV{HDF5PATH}/include)
 link_directories($ENV{HDF5PATH}/lib)
 link_libraries(libhdf5.so libhdf5_cpp.so)
 ## R
-include_directories(AFTER $ENV{RPATH}/lib64/R/include)
-include_directories(AFTER $ENV{RPATH}/lib64/R/library/Rcpp/include)
-include_directories(AFTER $ENV{RPATH}/lib64/R/library/RInside/include)
+include_directories(BEFORE $ENV{RPATH}/lib64/R/include)
+include_directories(BEFORE $ENV{RPATH}/lib64/R/library/Rcpp/include)
+include_directories(BEFORE $ENV{RPATH}/lib64/R/library/RInside/include)
 link_directories($ENV{RPATH}/lib64/R/lib)
-link_libraries(libR.so libRblas.so libRlapack.so)
-link_directories($ENV{RPATH}/lib64/R/library/Rcpp/libs)
-link_libraries(Rcpp.so)
-link_directories($ENV{RPATH}/lib64/R/library/RInside/lib)
-link_libraries(RInside.so)
+link_libraries(libR.so)
 ## ROOT
 include_directories(AFTER $ENV{ROOTSYS}/include)
 link_directories($ENV{ROOTSYS}/lib)
@@ -35,11 +31,11 @@ include_directories(AFTER $ENV{BGENPATH}/3rd_party/sqlite3)
 link_directories($ENV{BGENPATH}/build $ENV{BGENPATH}/build/db $ENV{BGENPATH}/build/3rd_party/sqlite3)
 link_libraries(libbgen.a libdb.a libsqlite3.a)
 ## OpenBLAS
-include_directories(AFTER $ENV{OPENBLASPATH}/include/openblas)
-link_libraries($ENV{OPENBLASPATH}/lib64/libopenblas.so)
+include_directories(BEFORE $ENV{OPENBLASPATH}/include)
+link_libraries($ENV{OPENBLASPATH}/lib/libopenblas.so)
 ## LAPACKE
 include_directories($ENV{LAPACKEPATH}/include)
-link_libraries($ENV{LAPACKEPATH}/lib64/liblapacke.so)
+link_libraries($ENV{LAPACKEPATH}/lib/liblapack.so)
 ############################################
 
 link_directories(/usr/lib/x86_64-linux-gnu)
