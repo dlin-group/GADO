@@ -7,7 +7,7 @@ echo "========== GADO Full Installation =========="
 ########################################
 # Need to be modified
 ########################################
-INSTALL_DIR=${1:-"/proj/dlin_lab/projects/GADO_sw/GADO/thirdParty"}
+INSTALL_DIR=${1:-"/path/to/GADO/thirdParty"}
 # if you have 4 cores available for compilation
 N_CORES=${N_CORES:-4} 
 
@@ -164,7 +164,7 @@ cd gsl-2.7
 chmod -R +x .
 ./configure --prefix=$INSTALL_DIR/gsl_build
 chmod -R +x .
-make -j1
+make -j$N_CORES
 chmod -R +x .
 make install
 cd ..
