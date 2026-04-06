@@ -44,14 +44,30 @@ GADO requires the following dependencies:
   - CMake should be configured with:
     - `-Dr=ON`
     - `-DR_DIR=<path-to-R-build>`
-    - `-DR_LIBRARY=<path-to-libR.so>`
-    - `-DR_Rcpp_LIBRARY=<path-to-Rcpp.so>`
 - [BGEN](https://enkre.net/cgi-bin/code/bgen)
 - Optional: [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit)
 
 ---
 
 ## Building the Project
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/dlin-lab/GADO
+cd GADO
+```
+
+### 2. Install dependencies
+
+We provide a helper script to install required dependencies:
+```
+bash /path/to/GADO/install.sh
+```
+
+**Important: You need to edit install.sh to match your system paths.**
+
+### 3. Set environment variables
 
 The CMake build expects the following environment variables to be set:
 
@@ -60,25 +76,20 @@ The CMake build expects the following environment variables to be set:
   (set by sourcing `bin/thisroot.sh` from the ROOT build directory)
 - `BGENPATH=<path-to-bgen-source>`
 
-And We provide **example environment setup scripts** for both CPU and GPU versions of the code: `env.sh` and `env_gpu.sh`, located in `/GADO/env`, to set these environment variables.
-
-Before installing or running GADO, please edit these bash scripts to specify the correct paths to your dependencies. Once configured, you can initialize the environment by running:
+And we provide **example environment setup scripts** for both CPU and GPU versions of the code: `env.sh` and `env_gpu.sh`, located in `/GADO/env`, to set these environment variables. Before installing or running GADO, please edit these bash scripts to specify the correct paths to your dependencies. Once configured, you can initialize the environment by running:
 
 ```
-source /path/to/env/env.sh        # CPU mode
-source /path/to/env/env_gpu.sh    # GPU mode
+source /path/to/GADO/env/env.sh        # CPU mode
+source /path/to/GADO/env/env_gpu.sh    # GPU mode
 ```
 
-**Notes**: 
+**Important**: 
 - Depending on your system, library directories may be named lib or lib64.
 - Please verify paths carefully and update both env.sh and CMakeLists.txt if needed.
 - After modifying environment variables, always clean the build directory before recompiling:
 
-**To build the project**:
+### 4. Build the project
 ```
-# Clone repository
-git clone https://github.com/dlin-lab/GADO
-
 # Create build directory
 mkdir GADO_build
 cd GADO_build
