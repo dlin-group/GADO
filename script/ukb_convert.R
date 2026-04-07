@@ -9,7 +9,9 @@ library(igraph)
 options = list(
   make_option(c("-i", "--input"), type="character", default=NULL),
   make_option(c("-o", "--output"), type="character", default=NULL),
-  make_option(c("-m", "--matrix"), type="character", default=NULL)
+  make_option(c("-m", "--matrix"), type="character", default=NULL),
+  make_option(c("-t", "--threshold"), type="double", default=0.025,
+              help="threshold for GRM (abs value < threshold set to 0)")
 )
 
 parser = OptionParser(option_list=options)
@@ -19,6 +21,9 @@ if(is.null(opt$input) || is.null(opt$output) || is.null(opt$matrix)){
   print_help(parser)
   stop("Must give input/output/matrix", call.=FALSE)
 }
+
+thresh <- opt$threshold
+cat("Threshold:", thresh, "\n")
 
 # =========================
 # Load GRM
@@ -30,9 +35,24 @@ sGRM <- env[[opt$matrix]]
 cat("Matrix dim:", dim(sGRM), "\n")
 
 # =========================
-# 2) block detection
+# Step 1: threshold
 # =========================
-g <- graph_from_adjacency_matrix((sGRM != 0), mode = "undirected", diag = FALSE)
+if (thresh > 0) {
+  cat("Applying threshold...\n")
+  
+  sGRM@x[abs(sGRM@x) < thresh] <- 0
+  
+  sGRM <- drop0(sGRM)
+  
+  cat("Non-zero entries after threshold:", length(sGRM@x), "\n")
+}
+
+# =========================
+# Step 2: block detection（connected components）
+# =========================
+g <- graph_from_adjacency_matrix((sGRM != 0),
+                                mode = "undirected",
+                                diag = FALSE)
 
 comp <- components(g)
 membership <- comp$membership
@@ -45,6 +65,11 @@ cat("Detected blocks:", B, "\n")
 block_list <- lapply(blk_ids, function(b) which(membership == b))
 block_sizes <- vapply(block_list, length, integer(1))
 
+cat("Max block size:", max(block_sizes), "\n")
+
+# =========================
+# Write HDF5
+# =========================
 if (file.exists(opt$output)) file.remove(opt$output)
 
 h5 <- H5File$new(opt$output, mode = "w")
@@ -75,10 +100,15 @@ for (i in seq_len(B)) {
                       ))
 }
 
-h5[["sample.id"]] <- rownames(sGRM)
+# =========================
+# ids
+# =========================
+if (!is.null(rownames(sGRM))) {
+  h5[["ids"]] <- rownames(sGRM)
+} else {
+  h5[["ids"]] <- seq_len(nrow(sGRM))
+}
 
-
-h5[["block.info"]] <- as.matrix(block_info)
 
 h5$close_all()
 
