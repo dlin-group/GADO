@@ -1,0 +1,5 @@
+*~
+*.a
+build
+.lock*
+.waf*
