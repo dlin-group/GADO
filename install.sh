@@ -142,7 +142,6 @@ cd ..
 ########################################
 
 echo "---- Building ROOT ----"
-tar -xzf root_v6.26.14.source.tar.gz
 mkdir root_install root_build && cd root_build
 
 export PATH=$INSTALL_DIR/R-4.4.1_build/bin:$PATH
