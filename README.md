@@ -42,7 +42,7 @@ GADO requires the following dependencies:
 - [R](https://www.r-project.org/)
   - Should be configured with `--enable-R-shlib --with-blas="/path/to/libopenblas.so" --with-lapack`
   - The following R packages must be installed:
-    - [Rcpp](https://cran.r-project.org/web/packages/Rcpp/index.html)
+    - [Rcpp 1.0.10](https://cran.r-project.org/web/packages/Rcpp/index.html)
     - [RInside](https://cran.r-project.org/web/packages/RInside/index.html)
     - [rhdf5](https://www.bioconductor.org/packages/devel/bioc/html/rhdf5.html)
     - [optparse](https://cran.r-project.org/web/packages/optparse/index.html)
