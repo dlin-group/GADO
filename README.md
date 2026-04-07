@@ -132,7 +132,7 @@ For score statistic variance estimation, GADO provides a **full-calculation vers
 ---
 ## GPU Version of GADO
 
-We provide a GPU implementation of GADO that accelerates **null model fitting** and **score/information calculations**. The usage is the same as the CPU version of GADO, except that the conditional expectation calculations are performed on the GPU.
+We provide a GPU implementation of GADO that accelerates **null model fitting**. The usage is the same as the CPU version of GADO, except that the conditional expectation calculations are performed on the GPU.
 
 Using an H100 GPU, GADO accelerates the computation by approximately **2.4--3.0-fold** speedups compared with the CPU implementation.
 
