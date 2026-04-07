@@ -50,6 +50,8 @@ cd ..
 # 3. HDF5 (in-source build)
 ########################################
 echo "---- Installing HDF5 ----"
+mkdir -p hdf5
+unzip hdf5.zip -d hdf5
 mkdir -p hdf5_build
 cd hdf5
 chmod -R +x .
