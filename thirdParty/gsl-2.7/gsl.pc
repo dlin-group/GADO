@@ -1,0 +1,11 @@
+prefix=/proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/gsl_build
+exec_prefix=/proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/gsl_build
+libdir=/proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/gsl_build/lib
+includedir=/proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/gsl_build/include
+GSL_CBLAS_LIB=-lgslcblas
+
+Name: GSL
+Description: GNU Scientific Library
+Version: 2.7
+Libs: -L/proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/gsl_build/lib -lgsl ${GSL_CBLAS_LIB} -lm -lm 
+Cflags: -I/proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/gsl_build/include
