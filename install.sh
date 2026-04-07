@@ -84,6 +84,7 @@ cd ..
 ########################################
 echo "---- Installing R ----"
 mkdir -p R-4.4.1_build
+tar -xzf R-4.4.1.tar.gz
 cd R-4.4.1
 
 chmod -R +x .
