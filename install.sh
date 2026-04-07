@@ -33,7 +33,8 @@ cd ..
 # 2. LAPACKE (CMake out-of-source)
 ########################################
 echo "---- Installing LAPACKE ----"
-
+mkdir -p lapack
+unzip lapack.zip -d lapack
 mkdir -p lapack_build lapack_install
 cd lapack_build
 
