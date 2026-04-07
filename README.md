@@ -196,7 +196,9 @@ Rscript /path/to/GADO/script/ukb_convert.R \
 -m sGRM -t 0.025
 ```
 
-Again, `sGRM` is the object name of the GRM matrix in `GRM.RData`. The `-t` option specifies a threshold used to sparsify the GRM: entries with absolute value smaller than the threshold are set to zero. The default value is 0.025. The block-diagonal structure is preserved when converting to HDF5. Each block of the original matrix will be further block-diagonalized internally by GADO if necessary. The `-M` option **must be enabled when running GADO**, since the GRM is stored in block-diagonal format. This option is typically required for **biobank-scale analyses**.
+Again, `sGRM` is the object name of the GRM matrix in `GRM.RData`. The `-t` option specifies a threshold used to sparsify the GRM: entries with absolute value smaller than the threshold are set to zero. The default value is 0.025. 
+
+The block-diagonal structure is preserved when converting to HDF5. Each block of the original matrix will be further block-diagonalized internally by GADO if necessary. The `-M` option **must be enabled when running GADO**, since the GRM is stored in block-diagonal format. This option is typically required for **biobank-scale analyses**.
 
 ---
 
