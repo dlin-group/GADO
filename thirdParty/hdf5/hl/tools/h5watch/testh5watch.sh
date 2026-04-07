@@ -12,7 +12,7 @@
 #
 # Tests for the h5watch tool
 #
-utils_testdir=/proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5/utils/test
+utils_testdir=/proj/dlin_lab/projects/kinship_EM/sw/hdf5/utils/test
 
 # Check to see if the VFD specified by the HDF5_DRIVER environment variable
 # supports SWMR.

@@ -14,8 +14,8 @@
 #
 ###############################################################################
 
-utils_testdir=/proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5/utils/test
-testdir=/proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5/test
+utils_testdir=/proj/dlin_lab/projects/kinship_EM/sw/hdf5/utils/test
+testdir=/proj/dlin_lab/projects/kinship_EM/sw/hdf5/test
 
 ###############################################################################
 ## test parameters

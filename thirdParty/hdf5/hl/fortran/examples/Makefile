@@ -380,7 +380,7 @@ am__DIST_COMMON = $(srcdir)/Makefile.in \
 	$(top_srcdir)/config/conclude_fc.am \
 	$(top_srcdir)/config/examples.am
 DISTFILES = $(DIST_COMMON) $(DIST_SOURCES) $(TEXINFOS) $(EXTRA_DIST)
-ACLOCAL = ${SHELL} /proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5/bin/missing aclocal-1.16
+ACLOCAL = ${SHELL} /proj/dlin_lab/projects/kinship_EM/sw/hdf5/bin/missing aclocal-1.16
 ADD_PARALLEL_FILES = no
 AMTAR = $${TAR-tar}
 
@@ -390,7 +390,7 @@ AMTAR = $${TAR-tar}
 # instead of CFLAGS, as CFLAGS is reserved solely for the user to define.
 # This applies to FCFLAGS, CXXFLAGS, CPPFLAGS, and LDFLAGS as well.
 AM_CFLAGS =   -std=c99  -Wall -Wcast-qual -Wconversion -Wextra -Wfloat-equal -Wformat=2 -Winit-self -Winvalid-pch -Wmissing-include-dirs -Wshadow -Wundef -Wwrite-strings -pedantic -Wno-c++-compat -Wlarger-than=2560 -Wlogical-op -Wframe-larger-than=16384 -Wpacked-bitfield-compat -Wsync-nand -Wno-unsuffixed-float-constants -Wdouble-promotion -Wtrampolines -Wstack-usage=8192 -Wmaybe-uninitialized -Wdate-time -Warray-bounds=2 -Wc99-c11-compat -Wduplicated-cond -Whsa -Wnormalized -Wnull-dereference -Wunused-const-variable -Walloca -Walloc-zero -Wduplicated-branches -Wformat-overflow=2 -Wformat-truncation=1 -Wattribute-alias -Wshift-overflow=2 -Wattribute-alias=2 -Wmissing-profile -Wc11-c2x-compat -fstdarg-opt -fdiagnostics-urls=never -fno-diagnostics-color -s  -Wbad-function-cast -Wcast-align -Wformat -Wimplicit-function-declaration -Wint-to-pointer-cast -Wmissing-declarations -Wmissing-prototypes -Wnested-externs -Wold-style-definition -Wpacked -Wpointer-sign -Wpointer-to-int-cast -Wredundant-decls -Wstrict-prototypes -Wswitch -Wunused-but-set-variable -Wunused-variable -Wunused-function -Wunused-parameter -Wincompatible-pointer-types -Wint-conversion -Wshadow -Wrestrict -Wcast-function-type -Wmaybe-uninitialized -Wcast-align=strict -Wno-aggregate-return -Wno-inline -Wno-missing-format-attribute -Wno-missing-noreturn -Wno-overlength-strings -Wno-jump-misses-init -Wstrict-overflow=2 -Wno-suggest-attribute=const -Wno-suggest-attribute=noreturn -Wno-suggest-attribute=pure -Wno-suggest-attribute=format -Wno-suggest-attribute=cold -Wno-suggest-attribute=malloc -O3
-AM_CPPFLAGS =  -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L   -DNDEBUG -UH5_DEBUG_API -I/proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5/src/H5FDsubfiling
+AM_CPPFLAGS =  -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L   -DNDEBUG -UH5_DEBUG_API -I/proj/dlin_lab/projects/kinship_EM/sw/hdf5/src/H5FDsubfiling
 AM_CXXFLAGS =    -std=c++11 -Wall -Wcast-qual -Wconversion -Wctor-dtor-privacy -Weffc++ -Wextra -Wfloat-equal -Wformat=2 -Winit-self -Winvalid-pch -Wmissing-include-dirs -Wnon-virtual-dtor -Wold-style-cast -Woverloaded-virtual -Wreorder -Wshadow -Wsign-promo -Wundef -Wwrite-strings -pedantic -Wlarger-than=2560 -Wlogical-op -Wframe-larger-than=16384 -Wpacked-bitfield-compat -Wsync-nand -Wdouble-promotion -Wtrampolines -Wstack-usage=8192 -Wmaybe-uninitialized -Wdate-time -Wopenmp-simd -Warray-bounds=2 -Wduplicated-cond -Whsa -Wnormalized -Wnull-dereference -Wunused-const-variable -Walloca -Walloc-zero -Wduplicated-branches -Wformat-overflow=2 -Wformat-truncation=1 -Wattribute-alias -Wshift-overflow=2 -Wattribute-alias=2 -Wmissing-profile -Wno-deprecated-copy -fstdarg-opt -fdiagnostics-urls=never -fno-diagnostics-color -s  -Wcast-align -Wmissing-declarations -Wpacked -Wredundant-decls -Wswitch -Wunused-but-set-variable -Wunused-function -Wunused-variable -Wunused-parameter -Wshadow -O3
 AM_DEFAULT_VERBOSITY = 0
 AM_FCFLAGS =   -std=f2008  -Waliasing -Wall -Wcharacter-truncation -Wextra -Wimplicit-interface -Wsurprising -Wunderflow -pedantic -Wintrinsics-std -Wimplicit-procedure -Wreal-q-constant -Wfunction-elimination -Wrealloc-lhs -Wrealloc-lhs-all -Wno-c-binding-type -Winteger-division -Wfrontend-loop-interchange  -fdiagnostics-urls=never -fno-diagnostics-color -s  -Wno-unused-dummy-argument -Wno-array-temporaries -O3
@@ -401,9 +401,9 @@ AM_LDFLAGS =
 AR = ar
 AR_FLAGS = cr
 ASSERTS = no
-AUTOCONF = ${SHELL} /proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5/bin/missing autoconf
-AUTOHEADER = ${SHELL} /proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5/bin/missing autoheader
-AUTOMAKE = ${SHELL} /proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5/bin/missing automake-1.16
+AUTOCONF = ${SHELL} /proj/dlin_lab/projects/kinship_EM/sw/hdf5/bin/missing autoconf
+AUTOHEADER = ${SHELL} /proj/dlin_lab/projects/kinship_EM/sw/hdf5/bin/missing autoheader
+AUTOMAKE = ${SHELL} /proj/dlin_lab/projects/kinship_EM/sw/hdf5/bin/missing automake-1.16
 AWK = gawk
 BUILD_MODE = production
 BYTESEX = little-endian
@@ -412,9 +412,9 @@ CCDEPMODE = depmode=gcc3
 CC_VERSION = /usr/bin/gcc ( gcc (GCC) 11.5.0 20240719 )
 CFLAGS = 
 CLANG_SANITIZE_CHECKS = none
-CONFIG_DATE = Fri Apr  3 16:48:20 EDT 2026
+CONFIG_DATE = Tue Jul 22 14:22:28 EDT 2025
 CONFIG_MODE = 
-CONFIG_USER = qiyaoqin@longleaf-login4.its.unc.edu
+CONFIG_USER = tcald@longleaf-login2.its.unc.edu
 CPPFLAGS = 
 CXX = g++
 CXXCPP = g++ -E
@@ -513,7 +513,7 @@ H5DWALK_LDFLAGS =
 H5DWALK_LIBS = 
 H5_CFLAGS =  -std=c99  -Wall -Wcast-qual -Wconversion -Wextra -Wfloat-equal -Wformat=2 -Winit-self -Winvalid-pch -Wmissing-include-dirs -Wshadow -Wundef -Wwrite-strings -pedantic -Wno-c++-compat -Wlarger-than=2560 -Wlogical-op -Wframe-larger-than=16384 -Wpacked-bitfield-compat -Wsync-nand -Wno-unsuffixed-float-constants -Wdouble-promotion -Wtrampolines -Wstack-usage=8192 -Wmaybe-uninitialized -Wdate-time -Warray-bounds=2 -Wc99-c11-compat -Wduplicated-cond -Whsa -Wnormalized -Wnull-dereference -Wunused-const-variable -Walloca -Walloc-zero -Wduplicated-branches -Wformat-overflow=2 -Wformat-truncation=1 -Wattribute-alias -Wshift-overflow=2 -Wattribute-alias=2 -Wmissing-profile -Wc11-c2x-compat -fstdarg-opt -fdiagnostics-urls=never -fno-diagnostics-color -s  -Wbad-function-cast -Wcast-align -Wformat -Wimplicit-function-declaration -Wint-to-pointer-cast -Wmissing-declarations -Wmissing-prototypes -Wnested-externs -Wold-style-definition -Wpacked -Wpointer-sign -Wpointer-to-int-cast -Wredundant-decls -Wstrict-prototypes -Wswitch -Wunused-but-set-variable -Wunused-variable -Wunused-function -Wunused-parameter -Wincompatible-pointer-types -Wint-conversion -Wshadow -Wrestrict -Wcast-function-type -Wmaybe-uninitialized -Wcast-align=strict -Wno-aggregate-return -Wno-inline -Wno-missing-format-attribute -Wno-missing-noreturn -Wno-overlength-strings -Wno-jump-misses-init -Wstrict-overflow=2 -Wno-suggest-attribute=const -Wno-suggest-attribute=noreturn -Wno-suggest-attribute=pure -Wno-suggest-attribute=format -Wno-suggest-attribute=cold -Wno-suggest-attribute=malloc -O3
 H5_CLASSPATH = 
-H5_CPPFLAGS = -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L   -DNDEBUG -UH5_DEBUG_API -I/proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5/src/H5FDsubfiling
+H5_CPPFLAGS = -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L   -DNDEBUG -UH5_DEBUG_API -I/proj/dlin_lab/projects/kinship_EM/sw/hdf5/src/H5FDsubfiling
 H5_CXXFLAGS =   -std=c++11 -Wall -Wcast-qual -Wconversion -Wctor-dtor-privacy -Weffc++ -Wextra -Wfloat-equal -Wformat=2 -Winit-self -Winvalid-pch -Wmissing-include-dirs -Wnon-virtual-dtor -Wold-style-cast -Woverloaded-virtual -Wreorder -Wshadow -Wsign-promo -Wundef -Wwrite-strings -pedantic -Wlarger-than=2560 -Wlogical-op -Wframe-larger-than=16384 -Wpacked-bitfield-compat -Wsync-nand -Wdouble-promotion -Wtrampolines -Wstack-usage=8192 -Wmaybe-uninitialized -Wdate-time -Wopenmp-simd -Warray-bounds=2 -Wduplicated-cond -Whsa -Wnormalized -Wnull-dereference -Wunused-const-variable -Walloca -Walloc-zero -Wduplicated-branches -Wformat-overflow=2 -Wformat-truncation=1 -Wattribute-alias -Wshift-overflow=2 -Wattribute-alias=2 -Wmissing-profile -Wno-deprecated-copy -fstdarg-opt -fdiagnostics-urls=never -fno-diagnostics-color -s  -Wcast-align -Wmissing-declarations -Wpacked -Wredundant-decls -Wswitch -Wunused-but-set-variable -Wunused-function -Wunused-variable -Wunused-parameter -Wshadow -O3
 H5_FCFLAGS =  -std=f2008  -Waliasing -Wall -Wcharacter-truncation -Wextra -Wimplicit-interface -Wsurprising -Wunderflow -pedantic -Wintrinsics-std -Wimplicit-procedure -Wreal-q-constant -Wfunction-elimination -Wrealloc-lhs -Wrealloc-lhs-all -Wno-c-binding-type -Winteger-division -Wfrontend-loop-interchange  -fdiagnostics-urls=never -fno-diagnostics-color -s  -Wno-unused-dummy-argument -Wno-array-temporaries -O3
 H5_FORTRAN_SHARED = no
@@ -582,7 +582,7 @@ LN_S = ln -s
 LTLIBOBJS = 
 LT_STATIC_EXEC = 
 MAINT = #
-MAKEINFO = ${SHELL} /proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5/bin/missing makeinfo
+MAKEINFO = ${SHELL} /proj/dlin_lab/projects/kinship_EM/sw/hdf5/bin/missing makeinfo
 MANIFEST_TOOL = :
 MAP_API = no
 MIRROR_VFD = no
@@ -624,7 +624,7 @@ PATH_SEPARATOR = :
 PREADWRITE = yes
 PROFILING = no
 RANLIB = ranlib
-ROOT = /proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5
+ROOT = /proj/dlin_lab/projects/kinship_EM/sw/hdf5
 ROS3_VFD = no
 RUNPARALLEL = 
 RUNSERIAL = 
@@ -648,7 +648,7 @@ THREADSAFE = no
 TIME = time
 TR = /usr/bin/tr
 TRACE_API = no
-UNAME_INFO = Linux longleaf-login4.its.unc.edu 5.14.0-570.51.1.el9_6.x86_64 #1 SMP PREEMPT_DYNAMIC Sat Sep 27 01:10:11 EDT 2025 x86_64 x86_64 x86_64 GNU/Linux
+UNAME_INFO = Linux longleaf-login2.its.unc.edu 5.14.0-503.31.1.el9_5.x86_64 #1 SMP PREEMPT_DYNAMIC Thu Mar 6 09:41:44 EST 2025 x86_64 x86_64 x86_64 GNU/Linux
 USE_FILE_LOCKING = 
 USE_FILTER_DEFLATE = yes
 USE_FILTER_SZIP = yes
@@ -656,10 +656,10 @@ USINGMEMCHECKER = no
 VERSION = 1.14.5
 WORDS_BIGENDIAN = no
 _ACJNI_JAVAC = 
-abs_builddir = /proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5/hl/fortran/examples
-abs_srcdir = /proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5/hl/fortran/examples
-abs_top_builddir = /proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5
-abs_top_srcdir = /proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5
+abs_builddir = /proj/dlin_lab/projects/kinship_EM/sw/hdf5/hl/fortran/examples
+abs_srcdir = /proj/dlin_lab/projects/kinship_EM/sw/hdf5/hl/fortran/examples
+abs_top_builddir = /proj/dlin_lab/projects/kinship_EM/sw/hdf5
+abs_top_srcdir = /proj/dlin_lab/projects/kinship_EM/sw/hdf5
 ac_ct_AR = 
 ac_ct_CC = gcc
 ac_ct_CXX = 
@@ -697,7 +697,7 @@ host_vendor = pc
 htmldir = ${docdir}
 includedir = ${prefix}/include
 infodir = ${datarootdir}/info
-install_sh = ${SHELL} /proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5/bin/install-sh
+install_sh = ${SHELL} /proj/dlin_lab/projects/kinship_EM/sw/hdf5/bin/install-sh
 libdir = ${exec_prefix}/lib
 libexecdir = ${exec_prefix}/libexec
 localedir = ${datarootdir}/locale
@@ -706,7 +706,7 @@ mandir = ${datarootdir}/man
 mkdir_p = $(MKDIR_P)
 oldincludedir = /usr/include
 pdfdir = ${docdir}
-prefix = /proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5_build
+prefix = /proj/dlin_lab/projects/kinship_EM/sw/hdf5_build
 program_transform_name = s,x,x,
 psdir = ${docdir}
 runstatedir = ${localstatedir}/run

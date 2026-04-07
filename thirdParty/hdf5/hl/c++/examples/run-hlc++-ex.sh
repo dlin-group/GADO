@@ -43,7 +43,7 @@ EXIT_FAILURE=1
 # $() won't clobbered it.
 #
 prefix_relto_examplesdir=$(
-prefix=/proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5_build
+prefix=/proj/dlin_lab/projects/kinship_EM/sw/hdf5_build
 examplesdir=${prefix}/share/hdf5_examples
 if [ ${examplesdir##${prefix}/} != ${examplesdir} ]; then
 	echo $(echo ${examplesdir##${prefix}/} | \

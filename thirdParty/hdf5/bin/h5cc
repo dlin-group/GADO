@@ -23,7 +23,7 @@
 ## then modify them accordingly to represent the new paths.               ##
 ##                                                                        ##
 ############################################################################
-prefix="/proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5_build"
+prefix="/proj/dlin_lab/projects/kinship_EM/sw/hdf5_build"
 exec_prefix="${prefix}"
 libdir="${exec_prefix}/lib"
 includedir="${prefix}/include"

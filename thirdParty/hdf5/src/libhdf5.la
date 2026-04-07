@@ -38,4 +38,4 @@ dlopen=''
 dlpreopen=''
 
 # Directory that this library needs to be installed in:
-libdir='/proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5_build/lib'
+libdir='/proj/dlin_lab/projects/kinship_EM/sw/hdf5_build/lib'

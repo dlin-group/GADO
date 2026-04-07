@@ -17,7 +17,7 @@ old_library=''
 inherited_linker_flags=''
 
 # Libraries that this one depends upon.
-dependency_libs=' /proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5_build/lib/libhdf5.la -lsz -lz -ldl -lm'
+dependency_libs=' /proj/dlin_lab/projects/kinship_EM/sw/hdf5_build/lib/libhdf5.la -lsz -lz -ldl -lm'
 
 # Names of additional weak libraries provided by this library
 weak_library_names=''

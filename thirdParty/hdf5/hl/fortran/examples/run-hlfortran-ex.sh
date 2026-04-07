@@ -32,7 +32,7 @@ EXIT_FAILURE=1
 
 # Where the tool is installed.
 # default is relative path to installed location of the tools
-prefix="${prefix:-/proj/dlin_lab/projects/GADO_sw/GADO/thirdParty/hdf5_build}"
+prefix="${prefix:-/proj/dlin_lab/projects/kinship_EM/sw/hdf5_build}"
 PARALLEL=no             # Am I in parallel mode?
 AR="ar"
 RANLIB="ranlib"
