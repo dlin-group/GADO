@@ -29,29 +29,61 @@ If you use GADO in your research, please cite:
 GADO requires the following dependencies:
 
 - [HDF5 C++](https://docs.hdfgroup.org/archive/support/HDF5/doc1.8/cpplus_RM/index.html)
+  - Should be configured with `--enable-cxx --enable-shared`
 - [OpenBLAS](https://www.openblas.net/)
+  - Make should be configured with:
+      - `NOFORTRAN=1`
+      - `NO_LTO=1`
+      - `USE_OPENMP=1`
 - [LAPACKE](https://www.netlib.org/lapack/lapacke.html)
+  - CMake should be configured with:
+    - `-DBUILD_SHARED_LIBS=ON`
+    - `-DLAPACKE=ON`
 - [R](https://www.r-project.org/)
-  - Must be configured with `--enable-R-shlib`
+  - Should be configured with `--enable-R-shlib --with-blas="/path/to/libopenblas.so" --with-lapack`
   - The following R packages must be installed:
-    - [Rcpp](https://cran.r-project.org/web/packages/Rcpp/index.html)
+    - [Rcpp 1.0.10](https://cran.r-project.org/web/packages/Rcpp/index.html)
     - [RInside](https://cran.r-project.org/web/packages/RInside/index.html)
     - [rhdf5](https://www.bioconductor.org/packages/devel/bioc/html/rhdf5.html)
     - [optparse](https://cran.r-project.org/web/packages/optparse/index.html)
     - [Matrix](https://cran.r-project.org/web/packages/Matrix/index.html)
     - [hdf5r](https://hhoeflin.github.io/hdf5r/)
+    - [igraph](https://cloud.r-project.org/web/packages/igraph/index.html)
 - [ROOT](https://root.cern/)
   - CMake should be configured with:
     - `-Dr=ON`
     - `-DR_DIR=<path-to-R-build>`
-    - `-DR_LIBRARY=<path-to-libR.so>`
-    - `-DR_Rcpp_LIBRARY=<path-to-Rcpp.so>`
+    - `-Dbuiltin_glew=ON`
+    - `-Dssl=OFF`
+    - `-Dgsl=ON`
 - [BGEN](https://enkre.net/cgi-bin/code/bgen)
 - Optional: [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit)
 
 ---
 
 ## Building the Project
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/dlin-group/GADO
+```
+
+### 2. Install dependencies
+
+We provide a helper script to install required dependencies:
+```
+bash ./GADO/install.sh
+```
+
+**Important Notes**:
+- You may need to edit `install.sh` to match your system paths.
+- Some dependencies may already be available on your system. In that case, you can modify `install.sh` to skip reinstalling them.
+- If you use existing system dependencies, make sure to also update the corresponding paths in:
+  - `CMakeLists.txt`
+  - `env.sh` / `env_gpu.sh`
+  
+### 3. Set environment variables
 
 The CMake build expects the following environment variables to be set:
 
@@ -60,25 +92,21 @@ The CMake build expects the following environment variables to be set:
   (set by sourcing `bin/thisroot.sh` from the ROOT build directory)
 - `BGENPATH=<path-to-bgen-source>`
 
-And We provide **example environment setup scripts** for both CPU and GPU versions of the code: `env.sh` and `env_gpu.sh`, located in `/GADO/env`, to set these environment variables.
-
-Before installing or running GADO, please edit these bash scripts to specify the correct paths to your dependencies. Once configured, you can initialize the environment by running:
+And we provide **example environment setup scripts** for both CPU and GPU versions of the code: `env.sh` and `env_gpu.sh`, located in `/GADO/env`, to set these environment variables. Before installing or running GADO, please edit these bash scripts to specify the correct paths to your dependencies. Once configured, you can initialize the environment by running:
 
 ```
-source /path/to/env/env.sh        # CPU mode
-source /path/to/env/env_gpu.sh    # GPU mode
+source ./GADO/env/env.sh        # CPU mode
+source ./GADO/env/env_gpu.sh    # GPU mode
 ```
 
-**Notes**: 
-- Depending on your system, library directories may be named lib or lib64.
-- Please verify paths carefully and update both env.sh and CMakeLists.txt if needed.
-- After modifying environment variables, always clean the build directory before recompiling:
+**Important Notes**:
+- Depending on your system, library directories may be named `lib` or `lib64`.
+- Please verify all paths carefully and update both `env.sh` / `env_gpu.sh` and `CMakeLists.txt` if needed.
+- After modifying environment variables or dependencies, always clean the build directory before recompiling.
+- Make sure to source `env.sh` or `env_gpu.sh` every time before building or running GADO.
 
-**To build the project**:
+### 4. Build the project
 ```
-# Clone repository
-git clone https://github.com/dlin-lab/GADO
-
 # Create build directory
 mkdir GADO_build
 cd GADO_build
@@ -87,10 +115,11 @@ cd GADO_build
 cmake -DUSE_CUDA=<OFF|ON> ../GADO
 
 # Compile
+# if you have 4 cores available for compilation
 make -j4
 ```
 
-Setting `USE_CUDA=OFF` runs GADO in CPU mode. To enable GPU acceleration, set `USE_CUDA=ON` if the CUDA toolkit and `nvcc` are available on your system. With GPU support enabled, the null model fitting step can be executed on the GPU.
+Setting `USE_CUDA=OFF` runs GADO in CPU mode. To enable GPU acceleration, set `USE_CUDA=ON` if the `CUDA toolkit` and `nvcc` are available on your system. With GPU support enabled, the null model fitting step can be executed on the GPU.
 
 ---
 
@@ -135,43 +164,39 @@ This step generates a **block-diagonal sparse GRM stored in RData format**, whic
 
 ## Convert GRM from RData to HDF5
 
-If the user uses `GRM.RData` generated by **FastSparseGRM**, it can be converted to HDF5 using the following scripts.
+If the user uses `GRM.RData` generated by FastSparseGRM or other softwares, it can be converted to HDF5 using the following scripts.
 
 ---
 
 ### Small GRM (dgCMatrix format)
 
-If the GRM has a relatively small dimension and is stored as a `dgCMatrix` object in an `.RData` file, convert it to an HDF5 **dense matrix** using:
+If the GRM has a relatively small dimension and is stored in an `.RData` file, convert it to an HDF5 **dense matrix** very quickly using:
 
 ```bash
 Rscript /path/to/GADO/script/R_to_hdf5.R \
--i /path/to/data/GRM.RData \
--o /path/to/data/GRM.hdf5 \
--m sGRM
+-i /path/to/GADO/data/GRM.RData \
+-o /path/to/GADO/data/GRM.hdf5 \
+-m sGRM -t 0.025
 ```
 
-Here, `sGRM` is the object name of the GRM matrix stored in `GRM.RData`.
+Here, `sGRM` is the object name of the GRM matrix stored in `GRM.RData`. The `-t` option specifies a threshold used to sparsify the GRM: entries with absolute value smaller than the threshold are set to zero. The default value is 0.025. 
 
-In this case, the `-M` option is **not required** when running GADO. The matrix will be block-diagonalized automatically when it is loaded into GADO.
+The input matrix does **not** need to be stored as a `dgCMatrix`; a standard dense R matrix is also supported. In this case, the `-M` option is **not required** when running GADO. The matrix will be automatically block-diagonalized internally during loading.
 
 ---
 
 ### Large GRM (dgCMatrix format)
 
-For large GRMs (e.g., biobank-scale datasets) stored as a `dgCMatrix` object in block-diagonal format, convert it to an HDF5 **block-diagonal matrix** using:
+For large GRMs (e.g., biobank-scale datasets) stored as a `dgCMatrix` object, convert it to an HDF5 **block-diagonal matrix** using:
 
 ```bash
 Rscript /path/to/GADO/script/ukb_convert.R \
--i /path/to/large_GRM.RData \
--o /path/to/large_GRM.hdf5 \
--m sGRM
+-i /path/to/GADO/data/GRM.RData \
+-o /path/to/GADO/data/large_GRM.hdf5 \
+-m sGRM -t 0.025
 ```
 
-Again, `sGRM` is the object name of the GRM matrix in `GRM.RData`.
-
-The block-diagonal structure is preserved when converting to HDF5. Each block of the original matrix will be further block-diagonalized internally by GADO if necessary.
-
-For large datasets, the `-M` option **must be enabled when running GADO**, since the GRM is stored in block-diagonal format. This option is typically required for **biobank-scale analyses**.
+Again, `sGRM` is the object name of the GRM matrix in `GRM.RData`. The `-t` option specifies a threshold used to sparsify the GRM: entries with absolute value smaller than the threshold are set to zero. The default value is 0.025. The block-diagonal structure is preserved when converting to HDF5. Each block of the original matrix will be further block-diagonalized internally by GADO if necessary. The `-M` option **must be enabled when running GADO**, since the GRM is stored in block-diagonal format. This option is typically required for **biobank-scale analyses**.
 
 ---
 
@@ -181,7 +206,7 @@ To accelerate genotype data loading, convert genotype data from **BGEN format to
 
 ```bash
 /path/to/GADO_build/bin/bgen_test \
--i /path/to/data/genotype.bgen \
+-i /path/to/GADO/data/genotype.bgen \
 -c 6
 ```
 
@@ -270,11 +295,7 @@ Specifies the maximum number of **time bins (max_tbins)** to reduce the number o
 
 Example:
 
-If observation times span **10 years** and the desired precision is **2 days**, a reasonable setting would be:
-
-```
-max_tbins = 3650
-```
+If observation times span **10 years** and the desired precision is **2 days**, a reasonable setting would be 3650.
 
 ---
 
@@ -455,7 +476,7 @@ Enables **verbose mode**, which prints more detailed runtime information during 
 
 ## GADO Example Usage
 
-Example scripts are provided to illustrate usage with the sample dataset in `/GADO/data`, using GRM.hdf5 as the input. For users working with a large GRM generated via ukb_convert.R, the -M option should be specified. No additional modifications to the code are necessary.
+Example scripts are provided to illustrate usage with the sample dataset in `/GADO/data`, using GRM.hdf5 as the input. For users working with a large GRM generated via ukb_convert.R (`large_GRM.hdf5`), the -M option should be specified. No additional modifications to the code are necessary.
 
 ### Example for Null Model Fitting and Score/Information Calculations
 

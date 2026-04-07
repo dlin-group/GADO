@@ -1,10 +1,13 @@
 ########################################
 # Need to be modified
 ########################################
-export INSTALL_DIR=${1:-"/proj/dlin_lab/projects/GADO_sw/GADO/thirdParty"}
+export INSTALL_DIR=${1:-"/path/to/GADO/thirdParty"}
 ########################################
 
 export LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH
+
+export LD_LIBRARY_PATH=$INSTALL_DIR/readline_build/lib:$LD_LIBRARY_PATH
+
 
 # module load cuda/12.4
 
@@ -28,11 +31,11 @@ export LD_LIBRARY_PATH=$INSTALL_DIR/hdf5_build/lib:$LD_LIBRARY_PATH
 export CFLAGS="-I$INSTALL_DIR/hdf5_build/include $CFLAGS"
 
 export OPENBLASPATH=$INSTALL_DIR/openblas_build
-export LD_LIBRARY_PATH=$OPENBLASPATH/lib64:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$OPENBLASPATH/lib:$LD_LIBRARY_PATH
 export CFLAGS="-I$INSTALL_DIR/OpenBLAS_build/include/openblas $CFLAGS"
 
 export LAPACKEPATH=$INSTALL_DIR/lapack_build
-export LD_LIBRARY_PATH=$LAPACKEPATH/lib64:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$LAPACKEPATH/lib:$LD_LIBRARY_PATH
 export CFLAGS="-I$INSTALL_DIR/lapack_build/include $CFLAGS"
 
 export RPATH=$INSTALL_DIR/R-4.4.1_build
