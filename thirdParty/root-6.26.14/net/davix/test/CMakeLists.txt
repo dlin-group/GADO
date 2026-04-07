@@ -1,1 +1,0 @@
-ROOT_ADD_GTEST(RRawFileDavix RRawFileDavix.cxx LIBRARIES RDAVIX RIO)
