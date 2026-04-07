@@ -34,15 +34,14 @@ cd ..
 ########################################
 echo "---- Installing LAPACKE ----"
 
-mkdir -p lapack_build
+mkdir -p lapack_build lapack_install
 cd lapack_build
 
 cmake ../lapack \
-  -DCMAKE_INSTALL_PREFIX=$INSTALL_DIR/lapack \
+  -DCMAKE_INSTALL_PREFIX=$INSTALL_DIR/lapack_install \
   -DBUILD_SHARED_LIBS=ON -DLAPACKE=ON
 
-make -j$N_CORES
-make install
+cmake --build . -j$N_CORES --target install
 
 cd ..
 
