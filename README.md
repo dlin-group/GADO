@@ -474,7 +474,7 @@ Enables **verbose mode**, which prints more detailed runtime information during 
 
 ## GADO Example Usage
 
-Example scripts are provided to illustrate usage with the sample dataset in `/GADO/data`, using GRM.hdf5 as the input. For users working with a large GRM generated via ukb_convert.R, the -M option should be specified. No additional modifications to the code are necessary.
+Example scripts are provided to illustrate usage with the sample dataset in `/GADO/data`, using GRM.hdf5 as the input. For users working with a large GRM generated via ukb_convert.R (`large_GRM.hdf5`), the -M option should be specified. No additional modifications to the code are necessary.
 
 ### Example for Null Model Fitting and Score/Information Calculations
 
