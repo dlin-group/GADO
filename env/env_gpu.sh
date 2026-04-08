@@ -2,12 +2,6 @@
 # Need to be modified
 ########################################
 export INSTALL_DIR=${1:-"/path/to/GADO/thirdParty"}
-########################################
-
-export LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH
-
-export LD_LIBRARY_PATH=$INSTALL_DIR/readline_build/lib:$LD_LIBRARY_PATH
-
 
 # module load cuda/12.4
 
@@ -23,6 +17,11 @@ else
     echo "[INFO] CUDA not found, using CPU mode"
 fi
 
+########################################
+
+export LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH
+
+export LD_LIBRARY_PATH=$INSTALL_DIR/readline_build/lib:$LD_LIBRARY_PATH
 
 export LD_LIBRARY_PATH=$INSTALL_DIR/gsl_build/lib:$LD_LIBRARY_PATH
 
