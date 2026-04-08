@@ -543,4 +543,4 @@ The output file `combined_test_gc.hdf5` contains p-values after genomic control 
 
 # UK Biobank GWAS Results
 
-The full list of significant SNPs and loci identified in the UK Biobank analysis from the paper can be found in /GADO/data.
+The full list of significant SNPs and loci identified in the UK Biobank analysis from the paper can be found in [URL].
