@@ -40,7 +40,7 @@ GADO requires the following dependencies:
     - `-DBUILD_SHARED_LIBS=ON`
     - `-DLAPACKE=ON`
 - [R](https://www.r-project.org/)
-  - Should be configured with `--enable-R-shlib --with-blas="/path/to/libopenblas.so" --with-lapack`
+  - Should be configured with `--enable-R-shlib --with-readline --with-blas="/path/to/libopenblas.so" --with-lapack`
   - The following R packages must be installed:
     - [Rcpp 1.0.10](https://cran.r-project.org/web/packages/Rcpp/index.html)
     - [RInside](https://cran.r-project.org/web/packages/RInside/index.html)
@@ -55,6 +55,7 @@ GADO requires the following dependencies:
     - `-DR_DIR=<path-to-R-build>`
     - `-Dbuiltin_glew=ON`
     - `-Dssl=OFF`
+    - `-Dxrootd=OFF`
     - `-Dgsl=ON`
 - [BGEN](https://enkre.net/cgi-bin/code/bgen)
 - Optional: [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit)
