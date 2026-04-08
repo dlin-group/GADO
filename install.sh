@@ -149,7 +149,7 @@ export PATH=$INSTALL_DIR/R-4.4.1_build/bin:$PATH
 export LD_LIBRARY_PATH=$INSTALL_DIR/R-4.4.1_build/lib64:$LD_LIBRARY_PATH
 export R_LIBS=$INSTALL_DIR/R-4.4.1_build/lib64/R/library
 export CPATH=$INSTALL_DIR/R-4.4.1_build/lib64/R/library/Rcpp/include:$INSTALL_DIR/R-4.4.1_build/lib64/R/include:$CPATH
-cmake -DCMAKE_INSTALL_PREFIX=$INSTALL_DIR/root_install ../root-6.26.14 -Dr=ON -Dbuiltin_glew=ON -Dssl=OFF -Dgsl=ON -DR_DIR=$INSTALL_DIR/R-4.4.1_build
+cmake -DCMAKE_INSTALL_PREFIX=$INSTALL_DIR/root_install ../root-6.26.14 -Dr=ON -Dbuiltin_glew=ON -Dssl=OFF -Dxrootd=OFF -Dgsl=ON -DR_DIR=$INSTALL_DIR/R-4.4.1_build
 
 cmake --build . --target install -j$N_CORES
 
