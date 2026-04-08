@@ -1,1 +1,2 @@
 *.zip filter=lfs diff=lfs merge=lfs -text
+thirdParty/hdf5.zip filter=lfs diff=lfs merge=lfs -text
