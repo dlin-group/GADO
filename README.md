@@ -101,7 +101,7 @@ source ./GADO/env/env_gpu.sh    # GPU mode
 
 **Important Notes**:
 - Depending on your system, library directories may be named `lib` or `lib64`.
-- Please verify all paths carefully and update both `env.sh` / `env_gpu.sh` and `CMakeLists.txt` if needed.
+- Please verify all paths and directories carefully and update both `env.sh` / `env_gpu.sh` and `CMakeLists.txt` if needed.
 - After modifying environment variables or dependencies, always clean the build directory before recompiling.
 - Make sure to source `env.sh` or `env_gpu.sh` every time before building or running GADO.
 
