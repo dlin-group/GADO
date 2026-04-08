@@ -93,7 +93,7 @@ chmod -R +x .
 ./configure --prefix=$INSTALL_DIR/R-4.4.1_build \
             --enable-R-shlib \
             --with-readline \
-            --with-blas="$INSTALL_DIR/openblas_build/lib/libopenblas.so" \ 
+            --with-blas="$INSTALL_DIR/openblas_build/lib/libopenblas.so" \
             --with-lapack
 
 make -j$N_CORES
