@@ -53,7 +53,6 @@ echo "---- Installing HDF5 ----"
 unzip hdf5.zip
 mkdir -p hdf5_build
 cd hdf5
-unset RPATH
 chmod -R +x .
 ./configure --prefix=$INSTALL_DIR/hdf5_build \
             --enable-cxx \
