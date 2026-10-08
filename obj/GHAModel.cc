@@ -66,12 +66,14 @@ GHAModel::GHAModel(string ghpath, string ghbase, size_t ghdim,
   delta_in      = d;
   X_in          = x;
   psi_in        = p;
-  use_var_ratio = false;
-  var_ratio_user= false;
+  use_var_ratio    = false;
+  vr_weights_ready = false;
+  vr_maf_edges     = vector<double>({0.001, 0.01, 0.05, 0.5});
+  InitVarRatioBins();
   spa_thresh    = numeric_limits<double>::max();
   vr_init_eval  = 30;
   vr_step_eval  = 10;
-  vr_epsilon    = 0.001;
+  vr_epsilon    = 0.0005;
   G_in          = new PMatrix<double>("G_in", T_in->GetNData(), 1);
   // expand psi into the pair structure
   cout << "expanding psi into all pairs structure..." << endl;
@@ -290,8 +292,6 @@ GHAModel::GHAModel(string ghpath, string ghbase, size_t ghdim,
   MAF             = 0.0;
   MAC             = 0.0;
   G_mean          = 0.0;
-  vr_mean         = 0.0;
-  var_ratio_found = false;
   // initialize input data matrices
   ebx_in        = new PMatrix<double>("ebx_in",     nind,          1);
   ebxw1_in      = new PMatrix<double>("ebxw1_in",   nind,          1);
@@ -351,6 +351,17 @@ GHAModel::GHAModel(string ghpath, string ghbase, size_t ghdim,
   V_unq_in    = NULL;
   Vinv_unq_in = NULL;
   G_transform = NULL;
+  XtW_resid       = NULL;
+  XtWX_inv_resid  = NULL;
+  XtWG_resid      = NULL;
+  coefG_resid     = NULL;
+  G_tilde_in      = NULL;
+  residualizer_ready  = false;
+  g_projection_ready  = false;
+  g_tilde_ready       = false;
+  g_resid_coef.clear();
+  
+  
   #ifdef __CUDA__
   cumalloc((void**) &w1q_dev, w1q->GetNData()*sizeof(double),
 	   "GHAModel", w1q->GetName());
@@ -504,6 +515,12 @@ GHAModel::~GHAModel(){
   if(Vinv_unq_in)   delete Vinv_unq_in;
   if(Asc)           delete Asc;
   if(G_transform)   delete G_transform;
+  if(XtW_resid)      delete XtW_resid;
+  if(XtWX_inv_resid) delete XtWX_inv_resid;
+  if(XtWG_resid)     delete XtWG_resid;
+  if(coefG_resid)    delete coefG_resid;
+  if(G_tilde_in)     delete G_tilde_in;
+  
   for(auto p : Stheta_cache) if(p) delete p;
   for(auto p : Igamma_cache) if(p) delete p;
   for(auto p : psiinv_cbs)   if(p) delete p;
@@ -556,6 +573,67 @@ GaussHermiteND GHAModel::GetGaussHermite(size_t dim) const{
 }
 
 
+// ============================================================
+// variance ratio MAF bins
+// ============================================================
+
+void GHAModel::InitVarRatioBins(){
+  if(vr_maf_edges.size() < 2)
+    vr_maf_edges = vector<double>({0.001, 0.01, 0.05, 0.5});
+  const size_t n = vr_maf_edges.size() - 1;
+  var_ratio.assign(n, vector<double>());
+  var_ratio_found.assign(n, false);
+  var_ratio_user.assign(n, false);
+  vr_mean.assign(n, 0.0);
+  vr_prev.assign(n, numeric_limits<double>::quiet_NaN());
+  vr_bin = 0;
+}
+
+
+void GHAModel::SetVarRatioMAFEdges(const vector<double>& edges){
+  if(edges.size() < 2){
+    cerr << "SetVarRatioMAFEdges: need at least two edges, ignoring." << endl;
+    return;
+  }
+  vr_maf_edges = edges;
+  sort(vr_maf_edges.begin(), vr_maf_edges.end());
+  InitVarRatioBins();   // clears every per-bin value
+}
+
+
+// MAF falls in bin i when it satisfies maf <= vr_maf_edges[i+1].
+// anything below the first edge is folded into bin 0.
+size_t GHAModel::GetVarRatioBin(double maf) const{
+  const size_t n = vr_mean.size();
+  if(n <= 1) return 0;
+  for(size_t i=0; i+1<vr_maf_edges.size(); i++)
+    if(maf <= vr_maf_edges[i+1]) return std::min(i, n-1);
+  return n - 1;
+}
+
+
+bool GHAModel::AllVarRatioFound() const{
+  for(size_t i=0; i<var_ratio_found.size(); i++)
+    if(!var_ratio_found[i]) return false;
+  return true;
+}
+
+
+// every bin's exact evaluations concatenated.  the returned reference is
+// only valid until the next call.  bin membership is lost, so this is for
+// the legacy HDF5 writers only, never for computing a median.
+const vector<double>& GHAModel::GetVarRatioEstimates() const{
+  size_t n = 0;
+  for(size_t b=0; b<var_ratio.size(); b++) n += var_ratio[b].size();
+  var_ratio_all.clear();
+  var_ratio_all.reserve(n);
+  for(size_t b=0; b<var_ratio.size(); b++)
+    var_ratio_all.insert(var_ratio_all.end(),
+			 var_ratio[b].begin(), var_ratio[b].end());
+  return var_ratio_all;
+}
+
+
 void GHAModel::TimeSortData(string label,
 			    vector<size_t>&  p, vector<size_t>&  p_t,
 			    PMatrix<double>* t, PMatrix<double>* t_sort,
@@ -602,6 +680,347 @@ void GHAModel::TimeSortData(string label,
   titer_us[label]+=duration_cast<nanoseconds>(t1-t0).count()*1.0e-3;
 }
 
+void GHAModel::PrepareGResidualizer(){
+
+  if(residualizer_ready)
+    return;
+
+  // ----------------------------------------------------------
+  // Number of nuisance covariates + intercept
+  // ----------------------------------------------------------
+
+  const size_t q =
+      X_in->GetNCols() + 1;
+
+  // ----------------------------------------------------------
+  // Final working weights
+  //
+  // IMPORTANT:
+  // use exactly the same W as ComputeVarRatio / ComputeCGFs
+  //
+  // W_i = clambda_i * ebxw1_i
+  // ----------------------------------------------------------
+
+  for(size_t i=0; i<nind; i++){
+
+    ub_in->SetVal(
+        i,
+        clambda_in->GetVal(i) *
+        ebxw1_in->GetVal(i)
+    );
+  }
+
+  vr_weights_ready = true;
+
+
+  // ----------------------------------------------------------
+  // XtW_resid = Xaug' W
+  //
+  // dimension:
+  // q x n
+  //
+  // row 0 = intercept
+  // row 1... = original covariates
+  // ----------------------------------------------------------
+
+  if(XtW_resid) delete XtW_resid;
+
+  XtW_resid =
+      new PMatrix<double>(
+          "XtW_resid",
+          q,
+          nind
+      );
+
+  XtW_resid->SetUseCblas(true);
+
+
+  for(size_t i=0; i<nind; i++){
+
+    const double wi =
+        ub_in->GetVal(i);
+
+    // intercept
+    XtW_resid->SetVal(
+        0,
+        i,
+        wi
+    );
+
+    for(size_t j=0; j<X_in->GetNCols(); j++){
+
+      XtW_resid->SetVal(
+          j + 1,
+          i,
+          wi *
+          X_in->GetVal(i, j)
+      );
+    }
+  }
+
+
+  // ----------------------------------------------------------
+  // A = Xaug' W Xaug
+  // ----------------------------------------------------------
+
+  PMatrix<double>* A =
+      new PMatrix<double>(
+          "XtWX_resid",
+          q,
+          q
+      );
+
+  A->Zero();
+
+  for(size_t i=0; i<nind; i++){
+
+    const double wi =
+        ub_in->GetVal(i);
+
+    for(size_t j=0; j<q; j++){
+
+      const double xj =
+          (j == 0)
+          ?
+          1.0
+          :
+          X_in->GetVal(
+              i,
+              j - 1
+          );
+
+      for(size_t k=j; k<q; k++){
+
+        const double xk =
+            (k == 0)
+            ?
+            1.0
+            :
+            X_in->GetVal(
+                i,
+                k - 1
+            );
+
+        A->SetVal(
+            j,
+            k,
+            A->GetVal(j, k) +
+            wi * xj * xk
+        );
+      }
+    }
+  }
+
+  A->MakeSymmetric(true);
+
+
+  // ----------------------------------------------------------
+  // A^{-1}
+  // ----------------------------------------------------------
+
+  if(XtWX_inv_resid) delete XtWX_inv_resid;
+
+  XtWX_inv_resid =
+      A->Inverse();
+
+  delete A;
+
+
+  // ----------------------------------------------------------
+  // Reusable small vectors
+  // ----------------------------------------------------------
+
+  if(XtWG_resid) delete XtWG_resid;
+
+  XtWG_resid =
+      new PMatrix<double>(
+          "XtWG_resid",
+          q,
+          1
+      );
+
+  if(coefG_resid) delete coefG_resid;
+
+  coefG_resid =
+      new PMatrix<double>(
+          "coefG_resid",
+          q,
+          1
+      );
+
+  if(G_tilde_in) delete G_tilde_in;
+
+  G_tilde_in =
+      new PMatrix<double>(
+          "G_tilde_in",
+          nind,
+          1
+      );
+
+  g_resid_coef.assign(q, 0.0);
+
+
+  residualizer_ready =
+      true;
+
+  g_projection_ready =
+      false;
+
+  g_tilde_ready =
+      false;
+
+
+  cout
+      << "Prepared fast weighted genotype residualizer: "
+      << nind
+      << " subjects, "
+      << q
+      << " nuisance columns."
+      << endl;
+}
+
+double GHAModel::ComputeResidualizedWorkingVar(){
+
+  PrepareGResidualizer();
+
+  XtWG_resid->Zero();
+  coefG_resid->Zero();
+
+
+  // ==========================================================
+  // b = Xaug' W Gc
+  //
+  // This is one small matrix-vector multiplication:
+  //
+  // (q x n) * (n x 1)
+  // ==========================================================
+
+  XtW_resid->RightMult(
+      *G_in,
+      XtWG_resid
+  );
+
+
+  // ==========================================================
+  // coef = A^{-1} b
+  // ==========================================================
+
+  XtWX_inv_resid->RightMult(
+      *XtWG_resid,
+      coefG_resid
+  );
+
+
+  // keep the plain vector copy in sync, ComputeCGFs uses it
+  for(size_t a=0; a<g_resid_coef.size(); a++)
+    g_resid_coef[a] = coefG_resid->GetVal(a);
+
+
+  // ==========================================================
+  // Gc' W Gc
+  // ==========================================================
+
+  double gWg = 0.0;
+
+  for(size_t i=0; i<nind; i++){
+
+    const double gi =
+        G_in->GetVal(i);
+
+    gWg +=
+        ub_in->GetVal(i) *
+        gi *
+        gi;
+  }
+
+
+  // ==========================================================
+  // b' A^{-1} b
+  // ==========================================================
+
+  double projection =
+      XtWG_resid->InnerColProduct(
+          0,
+          0,
+          *coefG_resid
+      );
+
+
+  // ==========================================================
+  // Gtilde' W Gtilde
+  // =
+  // Gc' W Gc - b' A^{-1}b
+  // ==========================================================
+
+  double GuG =
+      gWg -
+      projection;
+
+
+  g_projection_ready =
+      true;
+
+  g_tilde_ready =
+      false;
+
+
+  
+
+
+  return GuG;
+}
+
+void GHAModel::BuildResidualizedG(){
+
+  if(g_tilde_ready)
+    return;
+
+
+  if(!g_projection_ready){
+
+    double dummy =
+        ComputeResidualizedWorkingVar();
+
+    if(dummy <= 0.0){
+      return;
+    }
+  }
+
+
+  const size_t q =
+      X_in->GetNCols() + 1;
+
+
+  for(size_t i=0; i<nind; i++){
+
+    // intercept contribution
+    double fitted =
+        g_resid_coef[0];
+
+
+    // covariate contributions
+    for(size_t j=1; j<q; j++){
+
+      fitted +=
+          X_in->GetVal(
+              i,
+              j - 1
+          ) *
+          g_resid_coef[j];
+    }
+
+
+    G_tilde_in->SetVal(
+        i,
+        G_in->GetVal(i) -
+        fitted
+    );
+  }
+
+
+  g_tilde_ready =
+      true;
+}
 
 void GHAModel::UpdateBeta(string label,
 			  PMatrix<double>* x,      PMatrix<double>* expbx,
@@ -657,7 +1076,7 @@ void GHAModel::UpdateBeta(string label,
   tmprow->LimitL2Norm(beta_step_l2);
   (*beta) += (*tmprow);
   beta->ApplyLimits(-beta_max, beta_max);
-  for(size_t i=0; i<ebx->GetNData(); i++)
+  for(size_t i=0; i<expbx->GetNData(); i++)
     expbx->SetVal(i, exp(x->InnerRowProduct(i, 0, *beta)));
   expbx->ApplyLimits(exp(-betax_max), exp(betax_max));
   if(tmprow) delete tmprow;
@@ -767,7 +1186,7 @@ void GHAModel::SetSeedsAP(){
   tauprev     = 0.0;
   beta->Zero();
   ebx->SetAll(1.0);
-  var_ratio_found = false;
+  for(size_t i=0; i<var_ratio_found.size(); i++) var_ratio_found[i] = false;
   // initialize lambda
   TimeSortData("TimeSortDataAP", T_perm, T_perm_t,
 	       T, T_sort, X, X_sort, delta, delta_sort, ebxw1q, ebxw1q_sort);
@@ -1071,6 +1490,7 @@ void GHAModel::UpdateAP_tau(){
 //   return false;
 // }
 
+
 bool GHAModel::IterateAP(size_t niter){
   bool iterfail = false;
   bool taufail  = false;
@@ -1297,6 +1717,7 @@ bool GHAModel::IterateAP(size_t niter){
   
   return false;
 }
+
 
 
 double GHAModel::GetParamDiff(double val, double prev) const{
@@ -1742,14 +2163,19 @@ void GHAModel::SetSeedsIn(){
   gamma = 0.0;
   b_in->Zero();
   mu_in->Zero();
-  var_ratio_found = var_ratio_user;
+  for(size_t i=0; i<var_ratio_found.size(); i++)
+    var_ratio_found[i] = var_ratio_user[i];
+  // the null model is about to be refit, so the cached working weights
+  // and the residualizer built from them are no longer valid
+  vr_weights_ready   = false;
+  residualizer_ready = false;
   TimeSortData("TimeSortDataIn", T_in_perm, T_in_perm_t,
 	       T_in, T_in_sort, X_in, X_in_sort, delta_in, delta_in_sort,
 	       ebxw1_in, ebxw1_in_sort);
-  double dsum = accumulate(delta_in->GetDataConst().begin(),
-			   delta_in->GetDataConst().end(), 0.0);
+  double dsum = accumulate(delta_in_sort->GetDataConst().begin(),
+			   delta_in_sort->GetDataConst().end(), 0.0);
   for(size_t i=0; i<lambda_in->GetNData(); i++){
-    lambda_in->SetVal(i, delta_in->GetVal(i) / dsum);
+    lambda_in->SetVal(i, delta_in_sort->GetVal(i) / dsum);
     ebx_in->SetVal(i, exp(X_in->InnerRowProduct(i, 0, *beta)));
   }
   UpdateCLambda("UpdateIn_clambda",
@@ -1778,6 +2204,8 @@ void GHAModel::UpdateIn_b(){
   buffmat_in->RightMult(*buffvec_in, b_in);
   *b_in *= -1.0;
   *b_in += *bprev_in;
+  // ub_in no longer holds the final working weights
+  vr_weights_ready = false;
   auto t1 = high_resolution_clock::now();
   titer_us["UpdateIn_b"] += duration_cast<nanoseconds>(t1-t0).count()*1.0e-3;
 }
@@ -2219,7 +2647,7 @@ void GHAModel::ScoreIn_beta(){
   Ubeta_in->Zero();
   for(size_t i=0; i<X_in->GetNRows(); i++)
     Ubeta_in->AddMultRow(0, i, delta_in->GetVal(i) -
-			 clambda_in->GetVal(i) * ebxw1_in->GetVal(i), *X);
+			 clambda_in->GetVal(i) * ebxw1_in->GetVal(i), *X_in);
   auto t1 = high_resolution_clock::now();
   titer_ist_us["ScoreIn_beta"]+=duration_cast<nanoseconds>(t1-t0).count()*1e-3;
 }
@@ -2227,7 +2655,7 @@ void GHAModel::ScoreIn_beta(){
 
 void GHAModel::ScoreIn_h(){
   auto t0 = high_resolution_clock::now();
-  if(Uh_unq_in) Uh_unq->Zero();
+  if(Uh_unq_in) Uh_unq_in->Zero();
   else Uh_unq_in = new PMatrix<double>("Uh_unq_in", h_unq_in->GetNRows(), 1);
   size_t j = 0;
   double sum = 0.0, tmp = 0.0;
@@ -2385,7 +2813,6 @@ void GHAModel::ScoreInfoIn(){
   titer_ist_us["ScoreInfoIn"] = duration_cast<nanoseconds>(t1-t0).count()*1e-3;
 }
 
-
 void GHAModel::Solve(size_t maxiterap, size_t maxiterin){
   auto t0 = high_resolution_clock::now();
   SetSeedsAP();
@@ -2447,6 +2874,8 @@ void GHAModel::SetG(PMatrix<double>* g){
     MAC = 2 * G_in->GetNData() - MAC;
     MAF = 1 - MAF;
   }
+  // pick the variance ratio bin for this variant
+  vr_bin = GetVarRatioBin(MAF);
   if(utransform_G){
     if(!G_transform){
       G_transform = new PMatrix<double>("G_transform", nind, nind);
@@ -2495,6 +2924,9 @@ void GHAModel::SetG(PMatrix<double>* g){
 		     G_in->SetVal(i, G_in->GetVal(i) - G_mean);
   for(size_t i=0; i<index_map.size(); i++)
     G->SetVal(i, G_in->GetVal(index_map[i]));
+    
+  g_projection_ready = false;
+  g_tilde_ready      = false;
   auto t1 = high_resolution_clock::now();
   titer_ist_us["SetG"] = duration_cast<nanoseconds>(t1-t0).count()*1.0e-3;
 }
@@ -2550,7 +2982,8 @@ void GHAModel::ComputeScoreInfo(){
 void GHAModel::ComputeScoreTest(bool print){
   auto t0 = high_resolution_clock::now();
   if(print) cout << "Computing score test, MAC="
-		 << MAC << ", MAF=" << MAF << "  ...  ";
+		 << MAC << ", MAF=" << MAF
+		 << ", MAF bin=" << vr_bin << "  ...  ";
   niterations ++;
   ugamma      = 0.0;
   ugamma_cent = 0.0;
@@ -2578,7 +3011,8 @@ void GHAModel::ComputeScoreTest(bool print){
   ugamma_cent = accumulate(utcG.begin(), utcG.end(), 0.0);
   // decide whether to perform the full calculation
   bool full_calc = true;
-  if(use_var_ratio && var_ratio_found){
+  if(use_var_ratio && vr_bin < var_ratio_found.size() &&
+     var_ratio_found[vr_bin]){
     full_calc = false;
     ugamma_var = ComputeVarRatio();
     if(ugamma_var == 0.0 && (ugamma != 0.0 || ugamma_cent != 0.0)){
@@ -2693,7 +3127,7 @@ void GHAModel::ComputeScoreTest(bool print){
 	    for(size_t l=L; l<N; l++)
 	      Igamma->SetVal(l, s, Igamma->GetVal(l, s) * ebx_in->GetVal(v));
 	  }
-	  if(!var_ratio_found && cache_SI)
+	  if(!AllVarRatioFound() && cache_SI)
 	    Igamma_cache.push_back(new PMatrix<double>("Igamma_"+to_string(i),
 						       *Igamma));
 #ifdef __CUDA__
@@ -2755,7 +3189,7 @@ void GHAModel::ComputeScoreTest(bool print){
 	  }
 	  Vinv_unq_in->RightMult(*Stmp, Stheta);
 	  Stheta->InsertRows(N, i, 1, *Asc);
-	  if(!var_ratio_found && cache_SI)
+	  if(!AllVarRatioFound() && cache_SI)
 	    Stheta_cache.push_back(new PMatrix<double>("Stheta_"+to_string(i),
 						       *Stheta));
 #ifdef __CUDA__
@@ -2792,10 +3226,21 @@ void GHAModel::ComputeScoreTest(bool print){
   // score stat and p-value for non-centralized case
   if(ugamma == 0.0 && ugamma_var == 0.0) score_stat = 0.0;
   else score_stat = ugamma  / sqrt(ugamma_var);
+
+  // when the exact variance was used there is no variance ratio scaling
+  // for the saddlepoint routine to undo, so hand it 1.0
+  const double vr_use =
+    (use_var_ratio && vr_bin < var_ratio_found.size() &&
+     var_ratio_found[vr_bin]) ? vr_mean[vr_bin] : 1.0;
+
+  // ComputeCGFs needs g_resid_coef, which only ComputeVarRatio fills
+  if(abs(score_stat) >= spa_thresh && !g_projection_ready)
+    ComputeVarRatio();
+
   if((abs(score_stat) < spa_thresh)){
     pval = TMath::Prob(score_stat*score_stat, 1);
   }else{
-    pval = ComputeWeightedP(ugamma, ugamma_var);
+    pval = ComputeWeightedP(ugamma, ugamma_var, vr_use);
   }
     
   // score stat and p-value for centralized case
@@ -2806,7 +3251,7 @@ void GHAModel::ComputeScoreTest(bool print){
 //      (!full_calc && (abs(score_stat_cent) <= spa_thresh)))
 //     pval_cent = TMath::Prob(score_stat_cent*score_stat_cent, 1);
 //   else
-//     pval_cent = ComputePValue(ugamma_cent, ugamma_var);
+//     pval_cent = ComputePValue(ugamma_cent, ugamma_var, vr_use);
   // print values and timing
   auto t1 = high_resolution_clock::now();
   size_t ns = duration_cast<nanoseconds>(t1-t0).count();
@@ -2826,78 +3271,231 @@ void GHAModel::ComputeScoreTest(bool print){
 
 
 double GHAModel::ComputeVarRatio(){
+
   auto t0 = high_resolution_clock::now();
-  // set u_b if this is the first variance ratio being calculated
-  if(var_ratio.size() == 0 && (!var_ratio_found || var_ratio_user)){
-    if(ub_in == NULL ? true : (ub_in->GetNData() != nind)){
+
+  const size_t bin = vr_bin;
+  const size_t q   = X_in->GetNCols() + 1;
+
+
+  // ============================================================
+  // 1. working weights W_i = clambda_i * ebxw1_i
+  //
+  // independent of the SNP once the null model has been fit
+  // ============================================================
+
+  if(!vr_weights_ready){
+
+    if(ub_in == NULL || ub_in->GetNData() != nind){
       if(ub_in) delete ub_in;
       ub_in = new PMatrix<double>("ub_in", nind, 1);
     }
+
     for(size_t i=0; i<nind; i++)
       ub_in->SetVal(i, clambda_in->GetVal(i) * ebxw1_in->GetVal(i));
-    if(var_ratio_user) var_ratio.push_back(vr_mean);
+
+    vr_weights_ready = true;
   }
-  // calculate GuG
-  for(size_t i=0; i<nind; i++)
-    buffvec_in->SetVal(i, ub_in->GetVal(i) * G_in->GetVal(i));
-  double GuG = G_in->InnerColProduct(0, 0, *buffvec_in);
-  // check to see if we've found a sufficient rhat
-  if(!var_ratio_found){
-    if(std::isfinite(GuG) && GuG > 1e-8 &&
-       std::isfinite(ugamma_var) && ugamma_var > 0){
-      
-      double r = ugamma_var / GuG;
-      
-      if(std::isfinite(r) && r > 0)
-        var_ratio.push_back(r);
-      const size_t n = var_ratio.size();
-      if(n <= vr_init_eval ?
-           (n == vr_init_eval) : ((n - vr_init_eval) % vr_step_eval) == 0){
-        
-        // ---- compute median ----
-        std::vector<double> vr_copy = var_ratio;
-        std::sort(vr_copy.begin(), vr_copy.end());
-        
-        double med;
-        size_t m = vr_copy.size();
-        if(m % 2 == 0)
-          med = 0.5 * (vr_copy[m/2 - 1] + vr_copy[m/2]);
-        else
-          med = vr_copy[m/2];
-        
-        cout << "checking for acceptable variance ratio after "
-             << n << " evaluations... median = " << med << endl;
-        
-        // ---- convergence check: median stabilized ----
-        if(std::abs(med - vr_prev) / std::max(1e-12, std::abs(vr_prev)) < 0.005){
-          var_ratio_found = true;
-          vr_mean = std::min(med, 10.0);  
-          cout << "found acceptable variance ratio, rhat = "
-               << vr_mean << endl;
-          
-          for(auto s : Stheta_cache) delete s;
-          for(auto I : Igamma_cache) delete I;
-          Stheta_cache.clear();
-          Igamma_cache.clear();
+
+
+  // ============================================================
+  // 2. A = Xaug' W Xaug with Xaug = [1, X]
+  //
+  // built once, common to every SNP
+  // ============================================================
+
+  if(!residualizer_ready){
+
+    PMatrix<double>* A = new PMatrix<double>("XtWX_resid", q, q);
+    A->Zero();
+
+    for(size_t i=0; i<nind; i++){
+
+      const double wi = ub_in->GetVal(i);
+
+      for(size_t a=0; a<q; a++){
+
+        const double xa = (a == 0) ? 1.0 : X_in->GetVal(i, a-1);
+
+        for(size_t b=a; b<q; b++){
+
+          const double xb = (b == 0) ? 1.0 : X_in->GetVal(i, b-1);
+
+          A->SetVal(a, b, A->GetVal(a, b) + wi * xa * xb);
         }
-        
-        vr_prev = med;
       }
-      
+    }
+
+    A->MakeSymmetric(true);
+
+    if(XtWX_inv_resid) delete XtWX_inv_resid;
+    XtWX_inv_resid = A->Inverse();
+    delete A;
+
+    if(G_tilde_in == NULL || G_tilde_in->GetNData() != nind){
+      if(G_tilde_in) delete G_tilde_in;
+      G_tilde_in = new PMatrix<double>("G_tilde_in", nind, 1);
+    }
+
+    residualizer_ready = true;
+
+    cout << "Prepared weighted genotype residualizer with "
+         << q << " nuisance columns." << endl;
+  }
+
+  // must be sized even if PrepareGResidualizer() ran first
+  if(g_resid_coef.size() != q) g_resid_coef.assign(q, 0.0);
+
+
+  // ============================================================
+  // 3. b = Xaug' W Gc and Gc' W Gc in one pass over subjects
+  //
+  // G_in has already been centred in SetG()
+  // ============================================================
+
+  vector<double> XtWG(q, 0.0);
+  double GtWG = 0.0;
+
+  for(size_t i=0; i<nind; i++){
+
+    const double wi = ub_in->GetVal(i);
+    const double gi = G_in->GetVal(i);
+
+    GtWG    += wi * gi * gi;
+    XtWG[0] += wi * gi;
+
+    for(size_t a=1; a<q; a++)
+      XtWG[a] += wi * X_in->GetVal(i, a-1) * gi;
+  }
+
+
+  // ============================================================
+  // 4. beta_G = A^{-1} b,  q is small
+  // ============================================================
+
+  for(size_t a=0; a<q; a++){
+
+    double tmp = 0.0;
+
+    for(size_t b=0; b<q; b++)
+      tmp += XtWX_inv_resid->GetVal(a, b) * XtWG[b];
+
+    g_resid_coef[a] = tmp;
+  }
+
+
+  // ============================================================
+  // 5. Gtilde' W Gtilde = Gc' W Gc - b' A^{-1} b
+  // ============================================================
+
+  double projection = 0.0;
+  for(size_t a=0; a<q; a++) projection += XtWG[a] * g_resid_coef[a];
+
+  const double GuG = GtWG - projection;
+
+  g_projection_ready = true;
+  g_tilde_ready      = false;
+
+  if(!std::isfinite(GuG) || GuG <= 1e-8){
+    auto t1 = high_resolution_clock::now();
+    titer_ist_us["ComputeVarRatio"] =
+      duration_cast<nanoseconds>(t1-t0).count() * 1.0e-3;
+    return 0.0;
+  }
+
+
+  // ============================================================
+  // 6. update the estimate for THIS MAF bin only
+  //
+  // r = V_exact / (Gtilde' W Gtilde)
+  // ============================================================
+
+  if(use_var_ratio &&
+     bin < var_ratio_found.size() &&
+     !var_ratio_found[bin]){
+
+    if(std::isfinite(ugamma_var) && ugamma_var > 0.0){
+
+      const double r = ugamma_var / GuG;
+      if(std::isfinite(r) && r > 0.0) var_ratio[bin].push_back(r);
+
+      const size_t n = var_ratio[bin].size();
+
+      const bool evaluate_ratio =
+        (n <= vr_init_eval)
+          ? (n == vr_init_eval)
+          : ((n - vr_init_eval) % vr_step_eval == 0);
+
+      if(n > 0 && evaluate_ratio){
+
+        vector<double> vr_copy = var_ratio[bin];
+        sort(vr_copy.begin(), vr_copy.end());
+
+        const size_t m = vr_copy.size();
+        const double med =
+          (m % 2 == 0) ? 0.5 * (vr_copy[m/2 - 1] + vr_copy[m/2])
+                       : vr_copy[m/2];
+
+        cout << "checking variance ratio for MAF bin " << bin
+             << " (" << vr_maf_edges[bin]
+             << ", "  << vr_maf_edges[bin+1]
+             << "] after " << n << " exact evaluations..."
+             << " median = " << med << endl;
+
+        // only test convergence once a previous median exists
+        if(std::isfinite(vr_prev[bin])){
+
+          const double rel_change =
+            std::abs(med - vr_prev[bin]) /
+            std::max(1e-12, std::abs(vr_prev[bin]));
+
+          if(rel_change < vr_epsilon){
+
+            var_ratio_found[bin] = true;
+            vr_mean[bin]         = std::min(med, 10.0);
+
+            cout << "found acceptable variance ratio for MAF bin " << bin
+                 << ", rhat = " << vr_mean[bin] << endl;
+
+            // the caches are shared, only drop them once every bin is done
+            if(AllVarRatioFound()){
+              for(auto s : Stheta_cache) if(s) delete s;
+              for(auto I : Igamma_cache) if(I) delete I;
+              Stheta_cache.clear();
+              Igamma_cache.clear();
+            }
+          }
+        }
+
+        vr_prev[bin] = med;
+      }
     }
   }
+
+
   auto t1 = high_resolution_clock::now();
-  titer_ist_us["ComputeVarRatio"] = duration_cast<nanoseconds>(t1-t0).count()*1.-3;
-  return vr_mean * GuG;
+
+  titer_ist_us["ComputeVarRatio"] =
+    duration_cast<nanoseconds>(t1-t0).count() * 1.0e-3;
+
+
+  // ============================================================
+  // genome-wide approximate variance for this bin
+  //
+  // V = rhat[bin] * Gtilde' W Gtilde
+  // ============================================================
+
+  return (bin < vr_mean.size() ? vr_mean[bin] : 0.0) * GuG;
 }
 
-double GHAModel::ComputeWeightedP(double ug, double var)
+
+double GHAModel::ComputeWeightedP(double ug, double var, double vr)
 {
   double z = ug / std::sqrt(var);
   double absz = std::fabs(z);
   
   double p_normal = TMath::Prob(z*z, 1);
-  double p_spa    = ComputePValue(ug, var);
+  double p_spa    = ComputePValue(ug, var, vr);
   
   double c0 = 2.0;
   double delta = 0.5;
@@ -2909,116 +3507,473 @@ double GHAModel::ComputeWeightedP(double ug, double var)
   return (1.0 - w) * p_normal + w * p_spa;
 }
 
-double GHAModel::ComputePValue(const double& ug, const double& var){
+double GHAModel::ComputePValue(
+    const double& ug,
+    const double& var,
+    const double& var_ratio
+){
   auto t0 = high_resolution_clock::now();
-  
-  auto one_side_fallback = [&](double /*s*/) {
-    // symmetric split of chi-square(1) two-sided p
-    double p_two = TMath::Prob((ug*ug)/var, 1);
-    return 0.5 * p_two;
+
+  // =========================================================
+  // Normal two-sided fallback
+  //
+  // var should be the variance-ratio-adjusted score variance:
+  // var = var_ratio * variance_without_GRM
+  // =========================================================
+
+  auto two_side_fallback = [&]() {
+
+    if(
+      !std::isfinite(ug) ||
+      !std::isfinite(var) ||
+      var <= 0.0
+    ){
+      return 1.0;
+    }
+
+    double p = TMath::Prob(
+      (ug * ug) / var,
+      1
+    );
+
+    if(!std::isfinite(p)){
+      return 1.0;
+    }
+
+    return std::min(
+      1.0,
+      std::max(
+        0.0,
+        p
+      )
+    );
   };
-  
+
+
+  // =========================================================
+  // Input validation
+  // =========================================================
+
+  if(
+    !std::isfinite(ug) ||
+    !std::isfinite(var) ||
+    var <= 0.0 ||
+    !std::isfinite(var_ratio) ||
+    var_ratio <= 0.0
+  ){
+    return two_side_fallback();
+  }
+
+
+  // =========================================================
+  // Critical correction:
+  //
+  // Official GATE correction:
+  // SPA score target S is divided by sqrt(varRatio).
+  //
+  // Keep ComputeCGFs() on its existing raw-score scale,
+  // and rescale only the target supplied to the saddlepoint
+  // equation.
+  // =========================================================
+
+  const double spa_abs_score =
+    std::abs(ug) /
+    std::sqrt(var_ratio);
+
+
+  auto one_side_fallback = [&]() {
+
+    // Symmetric split of the adjusted normal two-sided p-value
+    return 0.5 * two_side_fallback();
+  };
+
+
   double p_two = 0.0;
-  
-  for(int i=-1; i<=1; i+=2){
-    double s  = ug * i;
-    
-    double k0 = 0.0, k1 = 0.0, k1p = 0.0, k2 = 0.0;
-    double c1 = 0.0, c1p = std::numeric_limits<double>::max();
-    double alpha = 0.0, alphap = std::numeric_limits<double>::max();
+
+
+  // =========================================================
+  // Compute lower and upper tails
+  // =========================================================
+
+  for(int i = -1; i <= 1; i += 2){
+
+    // FIXED:
+    // old: s = ug * i
+    // new: s = |ug| / sqrt(var_ratio) * i
+    double s = spa_abs_score * static_cast<double>(i);
+
+    double k0 = 0.0;
+    double k1 = 0.0;
+    double k1p = 0.0;
+    double k2 = 0.0;
+
+    double c1 = 0.0;
+    double c1p =
+      std::numeric_limits<double>::max();
+
+    double alpha = 0.0;
+    double alphap =
+      std::numeric_limits<double>::max();
+
     size_t nrit = 0;
-    
-    // init
-    ComputeCGFs(c1, k0, k1, k2);
-    
-    while(std::abs(c1 - c1p) >= 1e-4){
-      if(nrit++ >= 1000 || !std::isfinite(c1) || std::isnan(c1) || !std::isfinite(k2)){
-        // consistent two-sided fallback
-        return TMath::Prob((ug*ug)/var, 1);
+
+    // Initial CGF values at c1 = 0
+    ComputeCGFs(
+      c1,
+      k0,
+      k1,
+      k2
+    );
+
+
+    // =======================================================
+    // Solve K'(c1) = s
+    // =======================================================
+
+    while(
+      std::abs(c1 - c1p) >= 1e-4
+    ){
+
+      if(
+        nrit++ >= 1000 ||
+        !std::isfinite(c1) ||
+        !std::isfinite(k1) ||
+        !std::isfinite(k2) ||
+        k2 <= 0.0
+      ){
+        return two_side_fallback();
       }
-      
+
+
       alpha = (k1 - s) / k2;
+
       c1p = c1;
       c1 -= alpha;
+
       k1p = k1;
-      
-      ComputeCGFs(c1, k0, k1, k2);
-      
-      if(std::signbit(k1 - s) != std::signbit(k1p - s)){
-        if(std::abs(alpha) >= alphap){
+
+      ComputeCGFs(
+        c1,
+        k0,
+        k1,
+        k2
+      );
+
+
+      // Step-halving when the root is crossed
+      if(
+        std::signbit(k1 - s) !=
+        std::signbit(k1p - s)
+      ){
+
+        if(
+          std::abs(alpha) >= alphap
+        ){
+
           alphap /= 2.0;
-          c1 = c1p + (std::signbit(k1 - k1p) ? -1.0 : 1.0) * alphap;
-          ComputeCGFs(c1, k0, k1, k2);
+
+          c1 =
+            c1p +
+            (
+              std::signbit(k1 - k1p)
+                ? -1.0
+                : 1.0
+            ) * alphap;
+
+          ComputeCGFs(
+            c1,
+            k0,
+            k1,
+            k2
+          );
+
         }else{
+
           alphap = std::abs(alpha);
         }
       }
     }
-    
+
+
     double p_side = 0.0;
-    
-    ComputeCGFs(c1, k0, k1, k2);
-    
-    // fallback if CGF derivatives invalid
-    if(!std::isfinite(k1) || !std::isfinite(k2) || k2 <= 0.0){
-      p_side = one_side_fallback(s);
+
+    ComputeCGFs(
+      c1,
+      k0,
+      k1,
+      k2
+    );
+
+
+    // =======================================================
+    // Validate CGF derivatives
+    // =======================================================
+
+    if(
+      !std::isfinite(k1) ||
+      !std::isfinite(k2) ||
+      k2 <= 0.0
+    ){
+
+      p_side = one_side_fallback();
+
     }else{
-      double temp = c1*s - k0;
-      
-      // IMPORTANT: protect sqrt
-      if(!std::isfinite(temp) || temp <= 0.0){
-        p_side = one_side_fallback(s);
+
+      double temp =
+        c1 * s - k0;
+
+
+      // Protect the signed-root calculation
+      if(
+        !std::isfinite(temp) ||
+        temp <= 0.0
+      ){
+
+        p_side = one_side_fallback();
+
       }else{
-        double c2 = (std::signbit(c1) ? -1.0 : 1.0) * std::sqrt(2.0 * temp);
-        double c3 = c1 * std::sqrt(k2);
-        
-        if(!std::isfinite(c2) || !std::isfinite(c3) || std::abs(c2) < 1e-10 || (c3/c2) <= 0.0){
-          p_side = one_side_fallback(s);
+
+        double c2 =
+          (
+            std::signbit(c1)
+              ? -1.0
+              : 1.0
+          ) *
+          std::sqrt(
+            2.0 * temp
+          );
+
+
+        double c3 =
+          c1 *
+          std::sqrt(k2);
+
+
+        if(
+          !std::isfinite(c2) ||
+          !std::isfinite(c3) ||
+          std::abs(c2) < 1e-10 ||
+          (c3 / c2) <= 0.0
+        ){
+
+          p_side = one_side_fallback();
+
         }else{
-          double Z = c2 + std::log(c3 / c2) / c2;
-          
+
+          double Z =
+            c2 +
+            std::log(
+              c3 / c2
+            ) / c2;
+
+
           if(!std::isfinite(Z)){
-            p_side = one_side_fallback(s);
+
+            p_side = one_side_fallback();
+
           }else{
-            // one-sided tail chosen by sign of s (NOT by sign of Z)
-            // s>0 => upper tail; s<0 => lower tail
-            bool lower_tail = (s < 0.0);
-            p_side = R::pnorm(Z, 0.0, 1.0, lower_tail, false);
-            
-            // numeric guard
-            if(!std::isfinite(p_side)) p_side = one_side_fallback(s);
+
+            // s > 0: upper tail
+            // s < 0: lower tail
+            bool lower_tail =
+              (s < 0.0);
+
+
+            p_side = R::pnorm(
+              Z,
+              0.0,
+              1.0,
+              lower_tail,
+              false
+            );
+
+
+            if(!std::isfinite(p_side)){
+              p_side = one_side_fallback();
+            }
           }
         }
       }
     }
-    
+
+
     p_two += p_side;
   }
-  
-  auto t1 = high_resolution_clock::now();
-  titer_ist_us["ComputePValue"]=duration_cast<nanoseconds>(t1-t0).count()*1.-3;
-  
-  // final guard (two-sided)
-  if(!std::isfinite(p_two) || p_two < 0.0 || p_two > 1.0) return TMath::Prob((ug*ug)/var, 1);
+
+
+  auto t1 =
+    high_resolution_clock::now();
+
+  titer_ist_us["ComputePValue"] =
+    duration_cast<nanoseconds>(
+      t1 - t0
+    ).count() * 1.e-3;
+
+
+  // =========================================================
+  // Final two-sided guard
+  // =========================================================
+
+  if(
+    !std::isfinite(p_two) ||
+    p_two < 0.0 ||
+    p_two > 1.0
+  ){
+    return two_side_fallback();
+  }
+
+
   return p_two;
 }
 
+void GHAModel::ComputeCGFs(
+    const double& c1,
+    double& k0,
+    double& k1,
+    double& k2
+){
 
-void GHAModel::ComputeCGFs(const double& c1,
-			   double& k0, double& k1, double& k2){
+  // ============================================================
+  // Build residualized genotype only ONCE per variant
+  //
+  // Gtilde =
+  //
+  // Gc -
+  // Xaug (Xaug' W Xaug)^(-1) Xaug' W Gc
+  //
+  // g_resid_coef was already computed in ComputeVarRatio().
+  // ============================================================
+
+  if(!g_tilde_ready){
+
+    if(
+        !residualizer_ready ||
+        !g_projection_ready
+    ){
+
+      cerr
+          << "ERROR: residualized genotype coefficients "
+          << "were not prepared before ComputeCGFs()."
+          << endl;
+
+      k0 = 0.0;
+      k1 = 0.0;
+      k2 = 0.0;
+
+      return;
+    }
+
+
+    const size_t q =
+        X_in->GetNCols() + 1;
+
+
+    for(size_t i=0; i<nind; i++){
+
+      // intercept term
+      double fitted =
+          g_resid_coef[0];
+
+
+      // covariate terms
+      for(size_t a=1; a<q; a++){
+
+        fitted +=
+            X_in->GetVal(
+                i,
+                a - 1
+            ) *
+            g_resid_coef[a];
+      }
+
+
+      G_tilde_in->SetVal(
+          i,
+          G_in->GetVal(i) -
+          fitted
+      );
+    }
+
+
+    g_tilde_ready =
+        true;
+  }
+
+
+  // ============================================================
+  // CGF
+  //
+  // K(t)
+  // =
+  // sum_i u_i
+  // [
+  //   exp(t Gtilde_i)
+  //   -
+  //   t Gtilde_i
+  //   -
+  //   1
+  // ]
+  //
+  // Therefore:
+  //
+  // K''(0)
+  // =
+  // Gtilde' W Gtilde
+  //
+  // exactly matching the denominator used by ComputeVarRatio().
+  // ============================================================
+
   k0 = 0.0;
   k1 = 0.0;
   k2 = 0.0;
-  const size_t n = clambda_in->GetNData();
-  double u = 0.0, c1G = 0.0, ec1G = 0.0, G = 0.0;
+
+
+  const size_t n =
+      clambda_in->GetNData();
+
+
   for(size_t i=0; i<n; i++){
-    u    = ub_in->GetVal(i);
-    G    = G_in->GetVal(i);
-    c1G  = c1 * G;
-    ec1G = exp(c1G);
-    k0 += u * (ec1G - c1G - 1);
-    k1 += u * G * (ec1G - 1);
-    k2 += u * G * G * ec1G;
+
+    const double u =
+        ub_in->GetVal(i);
+
+
+    const double G =
+        G_tilde_in->GetVal(i);
+
+
+    const double c1G =
+        c1 *
+        G;
+
+
+    const double ec1G =
+        std::exp(c1G);
+
+
+    k0 +=
+        u *
+        (
+          ec1G -
+          c1G -
+          1.0
+        );
+
+
+    k1 +=
+        u *
+        G *
+        (
+          ec1G -
+          1.0
+        );
+
+
+    k2 +=
+        u *
+        G *
+        G *
+        ec1G;
   }
 }
 

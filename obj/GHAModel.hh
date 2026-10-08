@@ -11,6 +11,7 @@
 #ifdef __CUDA__
 #include "GMatrix.hh"
 #include <cublas_v2.h>
+#include <vector>
 #endif
 
 using namespace std;
@@ -90,11 +91,45 @@ public:
   virtual void   SetVarRatioStepEvals(size_t s)        { vr_step_eval = s;    }
   virtual double GetVarRatioEpsilon()            const { return vr_epsilon;   }
   virtual void   SetVarRatioEpsilon(double e)          { vr_epsilon = e;      }
-  virtual double GetVarRatio()                   const { return vr_mean;      }
+
+  // ============================================================
+  // Variance ratio, estimated separately in MAF bins.
+  //
+  // Default edges {0.001, 0.01, 0.05, 0.5} give three bins:
+  //   bin 0 : MAF [0.001, 0.01]
+  //   bin 1 : MAF (0.01,  0.05]
+  //   bin 2 : MAF (0.05,  0.5 ]
+  //
+  // Variants below the first edge fall into bin 0.
+  // ============================================================
+  virtual size_t GetNVarRatioBins()              const { return vr_mean.size();}
+  virtual const vector<double>& GetVarRatioMAFEdges() const {
+    return vr_maf_edges; }
+  // NOTE: this resets every per-bin value, call it BEFORE SetVarRatio()
+  virtual void   SetVarRatioMAFEdges(const vector<double>& edges);
+  virtual size_t GetVarRatioBin(double maf)      const;
+  virtual size_t GetCurrentVarRatioBin()         const { return vr_bin;       }
+
+  virtual double GetVarRatio(size_t b) const {
+    return b < vr_mean.size() ? vr_mean[b] : 0.0; }
+  virtual double GetVarRatio()                   const { return GetVarRatio(vr_bin); }
+  virtual void   SetVarRatio(size_t b, double vr){
+    if(b >= vr_mean.size()) return;
+    vr_mean[b] = vr; var_ratio_found[b] = true; var_ratio_user[b] = true; }
+  // one value applied to every MAF bin, for callers that predate binning
   virtual void   SetVarRatio(double vr){
-    vr_mean = vr; var_ratio_found = true; var_ratio_user = true; }
-  virtual const vector<double>& GetVarRatioEstimates() const{return var_ratio;}
-  virtual bool GetVarRatioConverged()         const { return var_ratio_found; }
+    for(size_t b=0; b<vr_mean.size(); b++) SetVarRatio(b, vr); }
+
+  virtual const vector<double>& GetVarRatioEstimates(size_t b) const {
+    return var_ratio[b]; }
+  // every bin's samples concatenated, kept so that the existing HDF5
+  // writers keep compiling.  the bin an entry came from is lost here,
+  // so use the indexed overload for anything quantitative.
+  virtual const vector<double>& GetVarRatioEstimates() const;
+  virtual bool GetVarRatioConverged(size_t b) const {
+    return b < var_ratio_found.size() && var_ratio_found[b]; }
+  virtual bool GetVarRatioConverged()            const { return AllVarRatioFound(); }
+  virtual bool AllVarRatioFound()                const;
   
   virtual size_t GetNParam()                      const { return npar;        }
   virtual size_t GetNIndiv()                      const { return nind;        }
@@ -195,9 +230,31 @@ public:
   virtual const vector<BDMatrix<double>*> GetEbbAP()  const{ return Ebb_cbs;  }
   virtual const vector<BDMatrix<double>*> GetEebbAP() const{ return Eebb_cbs; }
   virtual const vector<BDMatrix<double>*> GetEbbbbAP()const{ return Ebbbb_cbs;}
-  virtual const vector<vector<BDMatrix<double>*> >
+  virtual const vector<vector<BDMatrix<double>* > >
   GetEbbebAP() const{ return Ebbeb_cbs; }
+  
+  // ============================================================
+  // Fast weighted genotype residualization
+  //
+  // G_tilde = Gc - Xaug (Xaug' W Xaug)^(-1) Xaug' W Gc
+  // ============================================================
+  PMatrix<double>* XtW_resid;
+  PMatrix<double>* XtWX_inv_resid;
+  PMatrix<double>* XtWG_resid;
+  PMatrix<double>* coefG_resid;
+  PMatrix<double>* G_tilde_in;
+  bool residualizer_ready;
+  bool g_projection_ready;
+  bool g_tilde_ready;
+  std::vector<double> g_resid_coef;
+  
+  void PrepareGResidualizer();
+  double ComputeResidualizedWorkingVar();
+  void BuildResidualizedG();
+  
 
+  
+  
   virtual const double& GetPVal()          const { return pval;            }
   virtual const double& GetPValCent()      const { return pval_cent;       }
   virtual const double& GetScoreStat()     const { return score_stat;      }
@@ -205,6 +262,7 @@ public:
   virtual const double& GetUgamma()        const { return ugamma;          }
   virtual const double& GetUgammaCent()    const { return ugamma_cent;     }
   virtual const double& GetUgammaVar()     const { return ugamma_var;      }
+  
 
   virtual void SetSeedsAP();
   virtual void SetSeedsIn();
@@ -294,9 +352,10 @@ protected:
   virtual void InformationIn();
   virtual void ScoreInfoIn();
 
-  virtual double ComputeVarRatio();  // returns rhat*GUG
-  virtual double ComputePValue(const double& ug, const double& var); //p-value, saddle-point approx
-  virtual double ComputeWeightedP(double ug, double var);
+  virtual void InitVarRatioBins();   // (re)allocate the per-bin state
+  virtual double ComputeVarRatio();  // returns rhat[bin]*GUG
+  virtual double ComputePValue(const double& ug, const double& var, const double& var_ratio); //p-value, saddle-point approx
+  virtual double ComputeWeightedP(double ug, double var, double vr);
   virtual void ComputeCGFs(const double& c1,
 			   double& k0, double& k1, double& k2);
   
@@ -513,17 +572,24 @@ protected:
   GMatrix<double>* gSthetaI_G;
   #endif
 
-  // variance ratio
+  // ============================================================
+  // variance ratio, one independent estimate per MAF bin
+  // ============================================================
   bool use_var_ratio;
-  bool var_ratio_found;
-  bool var_ratio_user;
   size_t vr_init_eval;
   size_t vr_step_eval;
   double vr_epsilon;
-  double vr_mean;
-  double vr_prev;
   double spa_thresh;
-  vector<double> var_ratio;
+
+  vector<double> vr_maf_edges;       // bin boundaries, ascending
+  size_t vr_bin;                     // bin of the variant currently in G_in
+  vector<vector<double> > var_ratio; // per-bin exact-variance ratio samples
+  vector<bool>   var_ratio_found;    // per-bin convergence flag
+  vector<bool>   var_ratio_user;     // per-bin user-supplied flag
+  vector<double> vr_mean;            // per-bin rhat
+  vector<double> vr_prev;            // per-bin previous median
+  bool vr_weights_ready;             // ub_in holds clambda_in*ebxw1_in
+  mutable vector<double> var_ratio_all; // scratch for the no-arg accessor
 };
 
 #endif
