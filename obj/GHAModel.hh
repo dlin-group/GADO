@@ -8,6 +8,7 @@
 #include <vector>
 #include <map>
 #include <utility>
+#include <limits>
 #ifdef __CUDA__
 #include "GMatrix.hh"
 #include <cublas_v2.h>
@@ -18,6 +19,45 @@ using namespace std;
 
 class GHAModel{
 public:
+  // EXPERIMENT ONLY. Values are recalculated per variant and never feed
+  // the association score, p-value, or production variance ratio.
+  struct VRAuditRecord {
+    bool valid = false;
+    double raw = 0.0;
+    double cross = 0.0;       // sum u_b*c_b / scale_b
+    double correction = 0.0;  // sum c_b*c_b / scale_b
+    double exact = 0.0;
+    double working = 0.0;
+    double block_proxy = 0.0; // heuristic only, NOT a variance estimator
+    double no_tau_correction = 0.0; // diagnostic counterfactual only
+    double ratio = 0.0;
+    double ratio_block_proxy = 0.0;
+    double algebra_error = 0.0;
+    double orthogonality_max = 0.0;
+    double dominant_block_fraction = 0.0;
+    size_t dominant_block_size = 0;
+    size_t dominant_block_events = 0;
+    long long dominant_block_id = -1; // original GRM block ID (model order)
+    double tau_adjust_coeff = 0.0;   // h_tau = t - c' H^-1 q
+    double sum_asc2_scaled = 0.0;     // sum Asc_i^2 / scale_i
+    double sum_v_asc_scaled = 0.0;    // sum v_i Asc_i / scale_i
+    double tau_cross_term = 0.0;     // -2*h_tau*sum(v_i*Asc_i/scale_i)
+    double tau_squared_term = 0.0;   // h_tau^2*sum(Asc_i^2/scale_i)
+    double tau_decomposition_error = 0.0;
+    // Analytic/fixed-nuisance numerical tau Jacobian audit (not used in inference).
+    double I_gamma_tau_analytic = std::numeric_limits<double>::quiet_NaN();
+    double I_gamma_tau_fd = std::numeric_limits<double>::quiet_NaN();
+    double tau_projection_analytic = std::numeric_limits<double>::quiet_NaN();
+    double tau_projection_fd_c = std::numeric_limits<double>::quiet_NaN();
+    double h_tau_fd_c = std::numeric_limits<double>::quiet_NaN();
+    double I_gamma_tau_gap = std::numeric_limits<double>::quiet_NaN();
+    double h_tau_fd_c_gap = std::numeric_limits<double>::quiet_NaN();
+    long long top_tau_block_id = -1;
+    size_t top_tau_block_size = 0;
+    size_t top_tau_block_events = 0;
+    double top_tau_block_fraction = 0.0;
+  };
+
   
   GHAModel(string ghpath, string ghbase, size_t ghdim,
 	   size_t ghorder, bool ghstep,
@@ -61,6 +101,34 @@ public:
   virtual bool GetCacheSthetaIgamma()            const { return cache_SI;     }
   virtual void SetCacheSthetaIgamma(bool c)            { cache_SI = c;        }
   virtual bool GetVerbose()                      const { return verbose;      }
+  virtual void SetAPDiagnostics(bool enabled) { ap_audit = enabled; }
+  virtual void SetAPTauSeed(double value) { ap_tau_seed = value; }
+  // Skip Step 1 and fit Step 2 at a known tau. Experimental mode only.
+  virtual void SetExperimentalFixedTau(double value) {
+    fixed_tau_mode = true; fixed_tau_value = value;
+  }
+  virtual bool GetExperimentalFixedTau() const { return fixed_tau_mode; }
+  virtual void SetVRAuditEnabled(bool enabled) { vr_audit_enabled = enabled; }
+  // Diagnostic only; writes prefix_step1_summary.tsv and prefix_step1_blocks.tsv
+  virtual void WriteTauIFAudit(const string& prefix) const;
+  // Diagnostic only: numerical tau derivative of the IMPLEMENTED posterior
+  // weights at fixed (beta, baseline hazard), recomputing conditional b modes.
+  // Must run after loading or computing Step 2 score/information, BEFORE SNPs.
+  virtual void SetTauFDStep(double step) { tau_fd_step = step; }
+  // Fixed-nuisance finite-difference tau cross-information for the block-
+  // sandwich variance; the analytic H and q matrices remain unchanged.
+  // Keep the old virtual setter for ABI/source compatibility; new code uses
+  // SetTauFDCross() without introducing a new virtual-table entry.
+  virtual void SetExperimentalTauFDCross(bool enabled) { tau_fd_cross_enabled = enabled; }
+  void SetTauFDCross(bool enabled) { SetExperimentalTauFDCross(enabled); }
+  virtual void SetTauFDFastW1(bool enabled) { tau_fd_fast_w1 = enabled; }
+  virtual void PrepareTauFD(const string& prefix);
+  virtual void ComputeIn_EV_W1Only(); // FD-only; no higher posterior moments written
+  virtual void SetHQFDAuditEnabled(bool v) { hq_fd_audit_enabled=v; }
+  virtual void RunHQFDAudit(const string& prefix,double eps); // CPU-only; first SNP, fixed tau/genotype residuals
+  virtual const VRAuditRecord& GetVRAuditRecord() const {
+    return vr_audit_record;
+  }
   virtual void SetVerbose(bool v)                      { verbose = v;         }
 
   virtual double GetBetaRidge()                  const { return beta_ridge;     }
@@ -90,17 +158,28 @@ public:
   virtual size_t GetVarRatioStepEvals()          const { return vr_step_eval; }
   virtual void   SetVarRatioStepEvals(size_t s)        { vr_step_eval = s;    }
   virtual double GetVarRatioEpsilon()            const { return vr_epsilon;   }
-  virtual void   SetVarRatioEpsilon(double e)          { vr_epsilon = e;      }
+  virtual void   SetVarRatioEpsilon(double e)          { if(e > 0.0 && e < 1.0) vr_epsilon = e; }
+  // Defaults for the global ratio: 30 initial markers, +10 per update, two
+  // consecutive stable median changes, maximum 500 valid markers.
+  // No additional minimum marker count is enforced.
+  virtual size_t GetVarRatioMaxEvals()           const { return vr_max_eval; }
+  virtual void   SetVarRatioMaxEvals(size_t n)         { vr_max_eval = n;    }
+  virtual size_t GetVarRatioStableChecks()       const { return vr_stable_checks; }
+  virtual void   SetVarRatioStableChecks(size_t n)     { vr_stable_checks = std::max<size_t>(n, 1); }
+  virtual bool   GetVarRatioDiagnostics()        const { return vr_diagnostics; }
+  virtual void   SetVarRatioDiagnostics(bool v)        { vr_diagnostics = v; }
+  virtual size_t GetVarRatioStableCount(size_t b) const {
+    return b < vr_stable_count.size() ? vr_stable_count[b] : 0; }
+
 
   // ============================================================
-  // Variance ratio, estimated separately in MAF bins.
-  //
-  // Default edges {0.001, 0.01, 0.05, 0.5} give three bins:
-  //   bin 0 : MAF [0.001, 0.01]
-  //   bin 1 : MAF (0.01,  0.05]
-  //   bin 2 : MAF (0.05,  0.5 ]
-  //
-  // Variants below the first edge fall into bin 0.
+  // One global variance ratio over calibration MAF [0.001, 0.5].
+  // The one-element vector containers are retained for compatibility with
+  // existing GHAIO HDF5 writers; no MAF-specific calibration is performed.
+  // Variants outside the calibration range can still be association-tested.
+  // IMPORTANT: GHAModel only sees genotype vectors (SetG), not call/INFO/QC
+  // metadata. The upstream calibration driver must select high-quality,
+  // QC-passed, directly genotyped markers from the GRM marker source.
   // ============================================================
   virtual size_t GetNVarRatioBins()              const { return vr_mean.size();}
   virtual const vector<double>& GetVarRatioMAFEdges() const {
@@ -116,7 +195,7 @@ public:
   virtual void   SetVarRatio(size_t b, double vr){
     if(b >= vr_mean.size()) return;
     vr_mean[b] = vr; var_ratio_found[b] = true; var_ratio_user[b] = true; }
-  // one value applied to every MAF bin, for callers that predate binning
+  // Backward-compatible scalar setter (one-element calibration vector).
   virtual void   SetVarRatio(double vr){
     for(size_t b=0; b<vr_mean.size(); b++) SetVarRatio(b, vr); }
 
@@ -234,8 +313,9 @@ public:
   GetEbbebAP() const{ return Ebbeb_cbs; }
   
   // ============================================================
-  // Fast weighted genotype residualization
-  //
+  // Fast weighted genotype residualization. The exact genetic score and
+  // exact block variance retain centered G; working VR variance and the SPA
+  // CGF consistently use G_tilde.
   // G_tilde = Gc - Xaug (Xaug' W Xaug)^(-1) Xaug' W Gc
   // ============================================================
   PMatrix<double>* XtW_resid;
@@ -246,6 +326,7 @@ public:
   bool residualizer_ready;
   bool g_projection_ready;
   bool g_tilde_ready;
+  double g_working_var;  // cached G_tilde' W G_tilde (same value for VR and SPA)
   std::vector<double> g_resid_coef;
   
   void PrepareGResidualizer();
@@ -573,12 +654,31 @@ protected:
   #endif
 
   // ============================================================
-  // variance ratio, one independent estimate per MAF bin
+  // variance ratio, maintained as a one-element vector for HDF5 compatibility
   // ============================================================
   bool use_var_ratio;
   size_t vr_init_eval;
   size_t vr_step_eval;
+  size_t vr_max_eval;
+  size_t vr_stable_checks;
   double vr_epsilon;
+  bool   vr_diagnostics;
+  bool   ap_audit;
+  double ap_tau_seed;
+  bool   fixed_tau_mode;
+  double fixed_tau_value;
+  bool   vr_audit_enabled;
+  bool   ap_scores_fresh;
+  double tau_fd_step;
+  bool tau_fd_ready;
+  bool tau_fd_cross_enabled;
+  bool tau_fd_fast_w1;
+  bool hq_fd_audit_enabled;
+  vector<double> hq_analytic_q;
+  vector<double> tau_fd_dw1;
+  vector<double> tau_fd_c; // fixed-nuisance numerical -dU_xi/dtau
+  vector<double> tau_fd_direct_coef; // lambda*exp(X beta)*dw1/dtau
+  VRAuditRecord vr_audit_record;
   double spa_thresh;
 
   vector<double> vr_maf_edges;       // bin boundaries, ascending
@@ -588,6 +688,7 @@ protected:
   vector<bool>   var_ratio_user;     // per-bin user-supplied flag
   vector<double> vr_mean;            // per-bin rhat
   vector<double> vr_prev;            // per-bin previous median
+  vector<size_t> vr_stable_count;     // consecutive stable updates per bin
   bool vr_weights_ready;             // ub_in holds clambda_in*ebxw1_in
   mutable vector<double> var_ratio_all; // scratch for the no-arg accessor
 };

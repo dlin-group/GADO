@@ -9,6 +9,10 @@
 #include <chrono>
 #include <Rmath.h>
 #include <cmath>
+#include <stdexcept>
+#include <sstream>
+#include <fstream>
+#include <algorithm>
 #ifdef __CUDA__
 #include "CUDAUtils.hh"
 #include "gha_kernels.h"
@@ -16,6 +20,19 @@
 
 using namespace std;
 using namespace std::chrono;
+
+// Format console diagnostics without changing floating-point calculations or
+// stream state. Four digits after the decimal; very small values use scientific
+// notation so convergence residuals and GWAS p-values are not rounded to zero.
+static std::string Log4(double value){
+  std::ostringstream out;
+  if(std::isfinite(value) && value != 0.0 && std::fabs(value) < 1.e-4)
+    out << std::scientific;
+  else
+    out << std::fixed;
+  out << std::setprecision(4) << value;
+  return out.str();
+}
 
 GHAModel::GHAModel(string ghpath, string ghbase, size_t ghdim,
 		   size_t ghorder, bool ghstep,
@@ -68,12 +85,27 @@ GHAModel::GHAModel(string ghpath, string ghbase, size_t ghdim,
   psi_in        = p;
   use_var_ratio    = false;
   vr_weights_ready = false;
-  vr_maf_edges     = vector<double>({0.001, 0.01, 0.05, 0.5});
+  vr_maf_edges     = vector<double>({0.001, 0.5});
   InitVarRatioBins();
   spa_thresh    = numeric_limits<double>::max();
-  vr_init_eval  = 30;
-  vr_step_eval  = 10;
-  vr_epsilon    = 0.0005;
+  // Robust, MAF-stratified VR calibration defaults.
+  vr_init_eval      = 30;
+  vr_step_eval      = 10;
+  vr_max_eval       = 500;
+  vr_stable_checks  = 2;
+  vr_epsilon        = 0.01;  // 1% consecutive-median stability threshold
+  vr_diagnostics    = false;
+  ap_audit = false;
+  ap_tau_seed = 0.5;
+  fixed_tau_mode = false;
+  fixed_tau_value = 0.5;
+  vr_audit_enabled = false;
+  ap_scores_fresh = false; // -S may load cached info without Step 1 scores
+  tau_fd_step = 0.0;
+  tau_fd_ready = false;
+  tau_fd_cross_enabled = false;
+  tau_fd_fast_w1 = false;
+  hq_fd_audit_enabled = false;
   G_in          = new PMatrix<double>("G_in", T_in->GetNData(), 1);
   // expand psi into the pair structure
   cout << "expanding psi into all pairs structure..." << endl;
@@ -163,13 +195,12 @@ GHAModel::GHAModel(string ghpath, string ghbase, size_t ghdim,
   psiinv_in = new BDMatrix<double>("psiinv_in", *psi_in);
   psiinv_in->Invert();
   t3 = high_resolution_clock::now();
-  cout << "  " << scientific << setprecision(4) <<
-    duration_cast<nanoseconds>(t3-t2).count()*1.0e-9 << " s" << endl
+  cout << "  " << Log4(duration_cast<nanoseconds>(t3-t2).count()*1.0e-9) << " s" << endl
        << "inverting pairwise psi..." << endl;
   psiinv = new BDMatrix<double>("psiinv", *psi);
   psiinv->Invert();
   t2 = high_resolution_clock::now();
-  cout << "  " << duration_cast<nanoseconds>(t2-t3).count()*1.0e-9
+  cout << "  " << Log4(duration_cast<nanoseconds>(t2-t3).count()*1.0e-9)
        << " s" << endl << "evaluating sqrt of pairwise psi..." << endl;
   sqrtpsi = psi->Sqrt();
   t3 = high_resolution_clock::now();
@@ -359,6 +390,7 @@ GHAModel::GHAModel(string ghpath, string ghbase, size_t ghdim,
   residualizer_ready  = false;
   g_projection_ready  = false;
   g_tilde_ready       = false;
+  g_working_var      = numeric_limits<double>::quiet_NaN();
   g_resid_coef.clear();
   
   
@@ -457,8 +489,8 @@ GHAModel::~GHAModel(){
   if(ns_st > 0){
   for(auto& pr : titer_ist_us)
     if(pr.second != 0.0){
-      cout << pr.first << ":  " << pr.second << " us  "
-	   << pr.second/niterations << " us/iter" << endl;
+      cout << pr.first << ":  " << Log4(pr.second) << " us  "
+	   << Log4(pr.second/niterations) << " us/iter" << endl;
       pr.second = 0.0;
     }
   }
@@ -579,13 +611,14 @@ GaussHermiteND GHAModel::GetGaussHermite(size_t dim) const{
 
 void GHAModel::InitVarRatioBins(){
   if(vr_maf_edges.size() < 2)
-    vr_maf_edges = vector<double>({0.001, 0.01, 0.05, 0.5});
+    vr_maf_edges = vector<double>({0.001, 0.5});
   const size_t n = vr_maf_edges.size() - 1;
   var_ratio.assign(n, vector<double>());
   var_ratio_found.assign(n, false);
   var_ratio_user.assign(n, false);
   vr_mean.assign(n, 0.0);
   vr_prev.assign(n, numeric_limits<double>::quiet_NaN());
+  vr_stable_count.assign(n, 0);
   vr_bin = 0;
 }
 
@@ -868,158 +901,55 @@ void GHAModel::PrepareGResidualizer(){
 
   g_tilde_ready =
       false;
+  g_working_var = numeric_limits<double>::quiet_NaN();
 
 
-  cout
-      << "Prepared fast weighted genotype residualizer: "
-      << nind
-      << " subjects, "
-      << q
-      << " nuisance columns."
-      << endl;
+  // Residualizer initialized; no routine console output is needed.
 }
 
 double GHAModel::ComputeResidualizedWorkingVar(){
-
+  // Residualize G_c with respect to [1, X] under the SAME null-model
+  // working weights used for the variance-ratio denominator and SPA.
+  // This is the single source of truth for the score-test genotype.
   PrepareGResidualizer();
-
-  XtWG_resid->Zero();
-  coefG_resid->Zero();
-
-
-  // ==========================================================
-  // b = Xaug' W Gc
-  //
-  // This is one small matrix-vector multiplication:
-  //
-  // (q x n) * (n x 1)
-  // ==========================================================
-
-  XtW_resid->RightMult(
-      *G_in,
-      XtWG_resid
-  );
-
-
-  // ==========================================================
-  // coef = A^{-1} b
-  // ==========================================================
-
-  XtWX_inv_resid->RightMult(
-      *XtWG_resid,
-      coefG_resid
-  );
-
-
-  // keep the plain vector copy in sync, ComputeCGFs uses it
-  for(size_t a=0; a<g_resid_coef.size(); a++)
-    g_resid_coef[a] = coefG_resid->GetVal(a);
-
-
-  // ==========================================================
-  // Gc' W Gc
-  // ==========================================================
-
-  double gWg = 0.0;
-
-  for(size_t i=0; i<nind; i++){
-
-    const double gi =
-        G_in->GetVal(i);
-
-    gWg +=
-        ub_in->GetVal(i) *
-        gi *
-        gi;
+  const size_t q = X_in->GetNCols() + 1;
+  vector<double> xtwg(q, 0.0);
+  for(size_t i=0; i<nind; ++i){
+    const double weighted_g = ub_in->GetVal(i) * G_in->GetVal(i);
+    xtwg[0] += weighted_g;
+    for(size_t a=1; a<q; ++a)
+      xtwg[a] += X_in->GetVal(i, a-1) * weighted_g;
+  }
+  g_resid_coef.assign(q, 0.0);
+  for(size_t a=0; a<q; ++a){
+    for(size_t b=0; b<q; ++b)
+      g_resid_coef[a] += XtWX_inv_resid->GetVal(a,b) * xtwg[b];
+    if(!std::isfinite(g_resid_coef[a]))
+      throw std::runtime_error("Non-finite weighted genotype residualization coefficient");
   }
 
-
-  // ==========================================================
-  // b' A^{-1} b
-  // ==========================================================
-
-  double projection =
-      XtWG_resid->InnerColProduct(
-          0,
-          0,
-          *coefG_resid
-      );
-
-
-  // ==========================================================
-  // Gtilde' W Gtilde
-  // =
-  // Gc' W Gc - b' A^{-1}b
-  // ==========================================================
-
-  double GuG =
-      gWg -
-      projection;
-
-
-  g_projection_ready =
-      true;
-
-  g_tilde_ready =
-      false;
-
-
-  
-
-
-  return GuG;
+  // Direct weighted norm avoids catastrophic cancellation in
+  // G_c' W G_c - (X' W G_c)' (X' W X)^{-1} (X' W G_c).
+  double working_var = 0.0;
+  for(size_t i=0; i<nind; ++i){
+    double fitted = g_resid_coef[0];
+    for(size_t a=1; a<q; ++a)
+      fitted += X_in->GetVal(i,a-1) * g_resid_coef[a];
+    const double gtilde = G_in->GetVal(i) - fitted;
+    const double wi = ub_in->GetVal(i);
+    if(!std::isfinite(gtilde) || !std::isfinite(wi) || wi < 0.0)
+      throw std::runtime_error("Invalid working weight or residualized genotype");
+    G_tilde_in->SetVal(i, gtilde);
+    working_var += wi * gtilde * gtilde;
+  }
+  g_projection_ready = true;
+  g_tilde_ready = true;
+  g_working_var = working_var;
+  return working_var;
 }
 
 void GHAModel::BuildResidualizedG(){
-
-  if(g_tilde_ready)
-    return;
-
-
-  if(!g_projection_ready){
-
-    double dummy =
-        ComputeResidualizedWorkingVar();
-
-    if(dummy <= 0.0){
-      return;
-    }
-  }
-
-
-  const size_t q =
-      X_in->GetNCols() + 1;
-
-
-  for(size_t i=0; i<nind; i++){
-
-    // intercept contribution
-    double fitted =
-        g_resid_coef[0];
-
-
-    // covariate contributions
-    for(size_t j=1; j<q; j++){
-
-      fitted +=
-          X_in->GetVal(
-              i,
-              j - 1
-          ) *
-          g_resid_coef[j];
-    }
-
-
-    G_tilde_in->SetVal(
-        i,
-        G_in->GetVal(i) -
-        fitted
-    );
-  }
-
-
-  g_tilde_ready =
-      true;
+  if(!g_tilde_ready) (void)ComputeResidualizedWorkingVar();
 }
 
 void GHAModel::UpdateBeta(string label,
@@ -1383,114 +1313,6 @@ void GHAModel::UpdateAP_tau(){
 }
 
 
-// bool GHAModel::IterateAP(size_t niter){
-//   bool iterfail = false;
-//   bool taufail  = false;
-//   bool ignore_taulimit = false;
-//   for(size_t i=0; i<niter; i++){
-//     auto t0 = high_resolution_clock::now();
-//     niterations ++;
-//     gh_step_iter.back() ++;
-//     UpdateAP_w1q();
-//     UpdateAP_ebxw1q();
-//     double bnorm = GetMatrixDiff(beta, betaprev);
-//     double lnorm = GetMatrixDiff(lambda, lambdaprev);
-//     if(std::max(bnorm, lnorm) > 1e-4){
-//       UpdateBeta("UpdateAP_beta", X, ebx, T_sort, X_sort, delta_sort,ebxw1q_sort);
-//       UpdateAP_ebxw1q();
-//       UpdateLambda("Update_AP_lambda", lambda, lambdaprev,
-//                    T_sort, delta_sort, ebxw1q_sort);
-//       UpdateCLambda("UpdateAP_clambda", T_perm_t, lambda, clambda, T_sort);
-//     }
-//     UpdateAP_aq();
-//     UpdateAP_tau();
-//     tau_iter.push_back(tau);
-//     for(size_t i=0; i<beta->GetNData(); i++)
-//       beta_iter[i].push_back(beta->GetVal(i));
-//     auto t1 = high_resolution_clock::now();
-//     titer_us["IterateAP"] += duration_cast<nanoseconds>(t1-t0).count()*1.0e-3;
-//     if(verbose)
-//       cout << scientific << "iteration " << niterations << " "<< setprecision(3)
-// 	   << duration_cast<nanoseconds>(t1-t0).count()*1.0e-3 << " us, "
-// 	   << "beta_ridge=" << beta_ridge << ":" <<endl;
-//     bool converge = CheckConvergenceAP();
-//     if(gh_step == 0){
-//       if(converge || i==niter-1){
-// 	if(converge) return true;
-// 	else         return false;
-//       }
-//     }
-//     else{
-//       if(converge || i==niter-1 || (!ignore_taulimit && tau>=taulimit)){
-// 	cout << "converged or reached tau/iteration/gh order limit at gh order "
-// 	     << gh_step_iter.size()*gh_step 
-// 	     <<" after " << gh_step_iter.back() << " iterations" << endl;
-// 	if((!ignore_taulimit && tau >= taulimit) || i == niter-1){
-// 	  if(iterfail || taufail) return false;
-// 	  size_t n = niterations;
-// 	  vector<size_t> tmp = gh_step_iter;
-// 	  SetSeedsAP();
-// 	  niterations = n;
-// 	  gh_step_iter = tmp;
-// 	  if(i == niter-1) iterfail = true;
-// 	  else             taufail  = true;
-// 	  i = SIZE_MAX;
-// 	}
-// 	else{
-// 	  if(gh_step_iter.back() < gh_step_iter_conv)         return true;
-// 	  else if(gh_step_iter.size()*gh_step >= gh_step_max) return true;
-// 	}
-// 	if(converge) ignore_taulimit = true;
-// 	cout << "setting gh order to " << (gh_step_iter.size()+1)*gh_step
-// 	     << "..." << endl;
-// 	gh_step_iter.push_back(0);
-// 	string ghpath = gauss_hermite[0].GetPath();
-// 	string ghbase = gauss_hermite[0].GetBase();
-// 	size_t ghdim  = gauss_hermite[0].GetDimension();
-// 	gauss_hermite.resize(0);
-// 	for(size_t j=ghdim; j>0; j--)
-// 	  gauss_hermite.push_back(GaussHermiteND(ghpath, ghbase,
-// 						 gh_step_iter.size()*gh_step,j));
-// 	for(size_t j=0; j<gauss_hermite.size(); j++){
-// 	  for(auto& p : buff1_cbs[j]) if(p) delete p;
-// 	  size_t p = gauss_hermite[j].GetPowers()[0];
-// 	  buff1_cbs[j].resize(p, NULL);
-// 	  vector<double> rs2;
-// 	  #ifdef __CUDA__
-// 	  buff1_cbs_dev[j].resize(p, NULL);
-// 	  buff2_cbs_dev[j].resize(p, NULL);
-// 	  #endif
-// 	  for(size_t k=0; k<p; k++){
-// 	    buff1_cbs[j][k] = new PMatrix<double>("buff1_cbs_"+to_string(j),
-// 						  sqrtpsi_cbs[j]->GetNRows(),1);
-// 	    buff1_cbs[j][k]->SetUseCblas(false);
-// 	    gauss_hermite[j].GetRootSqrt2Permutation(rs2, k);
-// 	    for(size_t l=0; l<buff0_cbs[j]->GetNData(); l++)
-// 	      buff0_cbs[j]->SetVal(l, rs2[l%gauss_hermite[j].GetDimension()]);
-// 	    sqrtpsi_cbs[j]->RightMult(*buff0_cbs[j], buff1_cbs[j][k]);
-// 	    #ifdef __CUDA__
-// 	    if(buff1_cbs_dev[j][k]) cudaFree(buff1_cbs_dev[j][k]);
-// 	    cumalloc((void**) &buff1_cbs_dev[j][k],
-// 	       buff1_cbs[j][k]->GetNData()*sizeof(double),
-// 	       "GHAModel", buff1_cbs[j][k]->GetName());
-// 	    cumemcpy((void*) buff1_cbs_dev[j][k],
-// 		     (void*) &buff1_cbs[j][k]->GetData().front(),
-// 		     buff1_cbs[j][k]->GetNData()*sizeof(double),
-// 		     true, "GHAModel", buff1_cbs[j][k]->GetName());
-// 	    if(buff2_cbs_dev[j][k]) cudaFree(buff2_cbs_dev[j][k]);
-// 	    cumalloc((void**) &buff2_cbs_dev[j][k],
-// 		     buff1_cbs[j][k]->GetNData()*sizeof(double),
-// 		     "GHAModel", buff1_cbs[j][k]->GetName());
-// 	    #endif
-// 	  }
-// 	}
-//       }
-//     }
-//   }
-//   return false;
-// }
-
-
 bool GHAModel::IterateAP(size_t niter){
   bool iterfail = false;
   bool taufail  = false;
@@ -1541,7 +1363,7 @@ bool GHAModel::IterateAP(size_t niter){
       //       inside inner, ebx changes -> need refresh ebxw1q.
       double bl = get_bl();
       if(bl <= eps_bl){
-          cout << "INNER converged: beta/lambda, max(||dBeta||,||dLambda||)=" << bl << "\n";
+          cout << "INNER converged: beta/lambda\n";
         break;
       }
       
@@ -1591,11 +1413,11 @@ bool GHAModel::IterateAP(size_t niter){
     titer_us["IterateAP_outer"] += duration_cast<nanoseconds>(t1_outer-t0_outer).count()*1.0e-3;
     
     if(verbose){
-      cout << scientific << "OUTER " << outer+1
-           << " tau_before=" << tauprev
-           << " tau=" << tau
-           << " |dTau|=" << dTau
-           << " time(us)=" << duration_cast<nanoseconds>(t1_outer-t0_outer).count()*1.0e-3
+      cout << "OUTER " << outer+1
+           << " tau_before=" << Log4(tauprev)
+           << " tau=" << Log4(tau)
+           << " |dTau|=" << Log4(dTau)
+           << " time(us)=" << Log4(duration_cast<nanoseconds>(t1_outer-t0_outer).count()*1.0e-3)
            << endl;
     }
     
@@ -1718,8 +1540,6 @@ bool GHAModel::IterateAP(size_t niter){
   return false;
 }
 
-
-
 double GHAModel::GetParamDiff(double val, double prev) const{
   return abs((val-prev) / ((absolute_thresh || val==prev) ? 1.0 : prev));
 }
@@ -1743,9 +1563,9 @@ bool GHAModel::CheckConvergenceAP_TwoStage(bool freeze_bl, double eps_bl){
   if(verbose){
     beta->Print(beta->GetNData(), 4, "    ");
     cout << "    tau = " << tau << endl << "    "
-         << "||beta|| = "   << setprecision(3) << bnorm << ", "
-         << "||lambda|| = " << setprecision(3) << lnorm << ", "
-         << "|tau| = "      << setprecision(3) << tnorm << ", "
+         << "||beta|| = "   << Log4(bnorm) << ", "
+         << "||lambda|| = " << Log4(lnorm) << ", "
+         << "|tau| = "      << Log4(tnorm) << ", "
          << "freeze_bl="    << freeze_bl
          << endl;
   }
@@ -1770,9 +1590,9 @@ bool GHAModel::CheckConvergenceAP(){
   if(verbose){
     beta->Print(beta->GetNData(), 4, "    ");
     cout << "    tau = " << tau << endl << "    "
-	 << "||beta|| = "   << setprecision(3)   << bnorm << ", "
-	 << "||lambda|| = " << setprecision(3)   << lnorm << ", "
-	 << "|tau| = "      << setprecision(3)   << tnorm << endl;
+	 << "||beta|| = "   << Log4(bnorm) << ", "
+	 << "||lambda|| = " << Log4(lnorm) << ", "
+	 << "|tau| = "      << Log4(tnorm) << endl;
   }
   auto t1 = high_resolution_clock::now();
   titer_us["CheckConvergenceAP"]=duration_cast<nanoseconds>(t1-t0).count()*1.e-3;
@@ -1900,6 +1720,7 @@ void GHAModel::ScoreAP_h(){
   for(size_t i=0; i<M; i++){
     ti = T_unq->GetVal(i);
     tmp0 = 0.0;
+    sum = 0.0; // Each hazard score has its own risk set; do not cumulate across event times.
     for(j=0; j<T_sort->GetNData(); j++){
       tj = T_sort->GetVal(j);
       if(tj < ti) break;
@@ -2151,6 +1972,7 @@ void GHAModel::ScoreInfoAP(){
   ScoreAP_tau();
   ScoreAP_beta();
   ScoreAP_h();
+  ap_scores_fresh = true;
   auto t1 = high_resolution_clock::now();
   titer_ist_us["ScoreInfoAP"] = duration_cast<nanoseconds>(t1-t0).count()*1.0e-3;
 }
@@ -2163,12 +1985,22 @@ void GHAModel::SetSeedsIn(){
   gamma = 0.0;
   b_in->Zero();
   mu_in->Zero();
-  for(size_t i=0; i<var_ratio_found.size(); i++)
+  // A refitted null model invalidates the previous calibration samples and
+  // convergence history. User-supplied ratios are preserved separately.
+  for(size_t i=0; i<var_ratio_found.size(); i++){
     var_ratio_found[i] = var_ratio_user[i];
+    var_ratio[i].clear();
+    vr_prev[i] = numeric_limits<double>::quiet_NaN();
+    vr_stable_count[i] = 0;
+    if(!var_ratio_user[i]) vr_mean[i] = 0.0;
+  }
   // the null model is about to be refit, so the cached working weights
   // and the residualizer built from them are no longer valid
   vr_weights_ready   = false;
   residualizer_ready = false;
+  g_projection_ready = false;
+  g_tilde_ready      = false;
+  g_working_var     = numeric_limits<double>::quiet_NaN();
   TimeSortData("TimeSortDataIn", T_in_perm, T_in_perm_t,
 	       T_in, T_in_sort, X_in, X_in_sort, delta_in, delta_in_sort,
 	       ebxw1_in, ebxw1_in_sort);
@@ -2311,8 +2143,8 @@ bool GHAModel::IterateIn(size_t niter){
     auto t1 = high_resolution_clock::now();
     titer_us["Iterate"] += duration_cast<nanoseconds>(t1-t0).count()*1.0e-3;
     if(verbose)
-      cout << scientific << "iteration " << niterations << " "<< setprecision(3)
-	   << duration_cast<nanoseconds>(t1-t0).count()*1.0e-3 << " us:" <<endl;
+      cout << "iteration " << niterations << " "
+	   << Log4(duration_cast<nanoseconds>(t1-t0).count()*1.0e-3) << " us:" <<endl;
     bool converge = CheckConvergenceIn();
     if(converge) return true;
     if(tau >= taulimit) return false;
@@ -2328,8 +2160,8 @@ bool GHAModel::CheckConvergenceIn(){
   if(verbose){
     beta->Print(beta->GetNData(), 4, "    ");
     cout << "    tau = " << tau << endl << "    "
-	 << "||beta|| = "   << setprecision(3)   << bnorm << ", "
-	 << "||lambda|| = " << setprecision(3)   << lnorm << endl;
+	 << "||beta|| = "   << Log4(bnorm) << ", "
+	 << "||lambda|| = " << Log4(lnorm) << endl;
   }
   auto t1 = high_resolution_clock::now();
   titer_us["CheckConvergenceIn"]=duration_cast<nanoseconds>(t1-t0).count()*1e-3;
@@ -2775,6 +2607,53 @@ void GHAModel::InformationIn(){
   // get the inverse for the score test, excluding the last row and col
   Vinv_unq_in->SetData(V_unq_in->GetData());
   Vinv_unq_in->Invert();
+  if(vr_audit_enabled){
+    // Three deterministic column probes for ||I - V*Vinv||_infty.
+    // This is NOT a condition number; only a numerical-inverse check.
+    const size_t nprobe = V_unq_in->GetNRows();
+    double inverse_error = 0.0;
+    // Since Vinv was already computed, the induced infinity-norm
+    // condition estimate costs only O(n^2) additional arithmetic.
+    double information_inf_norm = 0.0;
+    double inverse_inf_norm = 0.0;
+    double diagonal_min = std::numeric_limits<double>::infinity();
+    double diagonal_max = 0.0;
+    for(size_t z=0; z<nprobe; ++z){
+      double row_sum = 0.0, inverse_row_sum = 0.0;
+      for(size_t col=0; col<nprobe; ++col){
+        row_sum += std::fabs(V_unq_in->GetVal(z,col));
+        inverse_row_sum += std::fabs(Vinv_unq_in->GetVal(z,col));
+      }
+      information_inf_norm = std::max(information_inf_norm, row_sum);
+      inverse_inf_norm = std::max(inverse_inf_norm, inverse_row_sum);
+      const double diag = std::fabs(V_unq_in->GetVal(z,z));
+      if(diag > 0.0 && std::isfinite(diag))
+        diagonal_min = std::min(diagonal_min,diag);
+      if(std::isfinite(diag)) diagonal_max=std::max(diagonal_max,diag);
+    }
+    std::vector<size_t> cols;
+    if(nprobe > 0) cols.push_back(0);
+    if(nprobe > 2) cols.push_back(nprobe/2);
+    if(nprobe > 1) cols.push_back(nprobe-1);
+    for(size_t col : cols){
+      for(size_t row=0; row<nprobe; ++row){
+        double val=0.0;
+        for(size_t k=0; k<nprobe; ++k)
+          val+=V_unq_in->GetVal(row,k)*Vinv_unq_in->GetVal(k,col);
+        val -= (row==col ? 1.0 : 0.0);
+        inverse_error=std::max(inverse_error,std::fabs(val));
+      }
+    }
+    cout << "[INFORMATION_IN_AUDIT] inverse_identity_max_abs="
+         << inverse_error << " cond_inf_est="
+         << information_inf_norm * inverse_inf_norm
+         << " norm_inf=" << information_inf_norm
+         << " inverse_norm_inf=" << inverse_inf_norm
+         << " diag_abs_ratio="
+         << (diagonal_min > 0.0 ? diagonal_max/diagonal_min
+                                : std::numeric_limits<double>::infinity())
+         << " note=cond_inf_uses_computed_inverse" << endl;
+  }
   // add the c1 row/col and d to V_unq
   V_unq_in->InsertRows(V_unq_in->GetNRows(), 0, 1, *c);
   c->InsertCols(c->GetNCols(), 0, 1, *d);
@@ -2813,20 +2692,552 @@ void GHAModel::ScoreInfoIn(){
   titer_ist_us["ScoreInfoIn"] = duration_cast<nanoseconds>(t1-t0).count()*1e-3;
 }
 
+
+// FD-only posterior mean kernel.  Implements EXACTLY the w1 formulas from
+// ComputeIn_EV_GH (small blocks) and ComputeIn_EV (larger blocks), but does
+// NOT compute Ebb/Eebb/Ebbeb or touch the fitted null parameters.
+// This kernel is opt-in and is never used during fitting or association score.
+void GHAModel::ComputeIn_EV_W1Only(){
+  w1_in->Zero();
+  const double stau=std::sqrt(tau);
+  GaussHermiteND gh1=gauss_hermite.back();
+  for(size_t q=0;q<psiinv_in->GetNBlocks();++q){
+    const size_t n=psiinv_in->GetBlockRows(q);
+    const size_t offset=psiinv_in->GetBlockOffset(q);
+    if(n==0 || offset+n>nind)
+      throw std::runtime_error("FD W1-only: invalid original block size or offset");
+    if(n<=gauss_hermite.size()){
+      // Keep the same full-block quadrature as ComputeIn_EV_GH(q).
+      const size_t g=gauss_hermite.size()-n;
+      GaussHermiteND gh=gauss_hermite[g];
+      const size_t p=gh.GetPowers()[0];
+      PMatrix<double>* block=psi_in->GetBlock(q);
+      PMatrix<double> sqrtpsi("fd_sqrt_psi",n,n);
+      block->Sqrt(&sqrtpsi);
+      delete block;
+      PMatrix<double> zz("fd_gh_z",n,1);
+      PMatrix<double> bb("fd_gh_b",n,1);
+      std::vector<double> roots;
+      std::vector<double> numerator(n,0.0);
+      double denominator=0.0;
+      for(size_t j=0;j<p;++j){
+        gh.GetRootSqrt2Permutation(roots,j);
+        for(size_t k=0;k<n;++k) zz.SetVal(k,roots[k]);
+        sqrtpsi.RightMult(zz,&bb);
+        bb *= stau;
+        double log_event=0.0,log_hazard=0.0;
+        for(size_t k=0;k<n;++k){
+          const size_t i=offset+k;
+          const double earg=std::exp(bb.GetVal(k));
+          zz.SetVal(k,earg);
+          log_event += delta_in->GetVal(i)*bb.GetVal(k);
+          log_hazard += clambda_in->GetVal(i)*ebx_in->GetVal(i)*earg;
+        }
+        const double weight=gh.GetWeightProd(j)*std::exp(log_event-log_hazard);
+        denominator+=weight;
+        for(size_t k=0;k<n;++k)
+          numerator[k]+=zz.GetVal(k)*weight;
+      }
+      if(!std::isfinite(denominator) || denominator<=0.0)
+        throw std::runtime_error("FD W1-only: invalid GH block normalization");
+      for(size_t k=0;k<n;++k){
+        const double v=numerator[k]/denominator;
+        if(!std::isfinite(v))
+          throw std::runtime_error("FD W1-only: nonfinite small-block posterior mean");
+        w1_in->SetVal(offset+k,v);
+      }
+    }else{
+      // Exactly the 1D posterior-mean marginal approximation in ComputeIn_EV.
+      for(size_t k=0;k<n;++k){
+        const size_t i=offset+k;
+        const double mui=mu_in->GetVal(i);
+        const double sigmai=sigma_in->GetVal(i);
+        double denominator=0.0,numerator=0.0;
+        for(size_t j=0;j<gh1.GetOrder();++j){
+          double arg=sigmai*gh1.GetRootSqrt2(j)+mui;
+          double m=delta_in->GetVal(i)*arg;
+          arg=std::exp(arg);
+          m-=clambda_in->GetVal(i)*ebx_in->GetVal(i)*arg;
+          m=std::exp(m)*gh1.GetWeight(j);
+          denominator+=m;
+          numerator+=m*arg;
+        }
+        const double v=(numerator==0.0) ? numerator : numerator/denominator;
+        if(!std::isfinite(v))
+          throw std::runtime_error("FD W1-only: nonfinite large-block posterior mean");
+        w1_in->SetVal(i,v);
+      }
+    }
+  }
+}
+
+// FIXED-NUISANCE NUMERICAL TAU DERIVATIVE. The nuisance parameters beta and
+// Breslow hazard jumps are held fixed. Only the random-effect conditional mode
+// and the existing approximate posterior moments are recomputed when tau is
+// changed. This does NOT change the fitted null model or genetic score.
+void GHAModel::PrepareTauFD(const string& prefix){
+  if(!(std::isfinite(tau_fd_step) && tau_fd_step>0.0 &&
+       tau_fd_step<tau))
+    throw std::runtime_error("Tau FD step must satisfy 0 < step < fitted tau");
+  if(!w1_in || !b_in || !Ebb_in || !Ebbeb_in || !V_unq_in || !Vinv_unq_in)
+    throw std::runtime_error("Tau FD needs loaded/computed Step 2 score and information");
+  // A prefix is optional when the FD Jacobian is needed for VR calibration
+  // rather than for an audit. Empty => calculate but do not write TSV files.
+
+  // Keep routine FD logs quiet even when generic -v is used. Detailed FD
+  // progress is intended only for explicit numerical audit runs that supply
+  // --tau-fd-audit-prefix AND -v. This affects logging only.
+  const bool fd_detail = verbose && !prefix.empty();
+  const auto fd_wall_start = high_resolution_clock::now();
+  if(fd_detail) std::cout << "[TAU_FD_TIMING] begin: n_ind=" << nind
+                         << " n_event_times=" << (T_unq ? T_unq->GetNData() : 0)
+                         << std::endl;
+  const double tau_saved = tau;
+  vector<double> b_saved = b_in->GetDataConst();
+  vector<double> bprev_saved = bprev_in->GetDataConst();
+  vector<double> w1_saved = w1_in->GetDataConst();
+  // Perturbed W1-only calls leave Ebb/Eebb/Ebbeb untouched.
+  if(fd_detail) std::cout << "[GADO_TAU_CROSS] derivative=central_fd; posterior="
+                         << (tau_fd_fast_w1 ? "FIRST_MOMENT_ONLY" : "FULL_POSTERIOR_MOMENTS") << std::endl;
+  if(w1_saved.size()!=nind || b_saved.size()!=nind)
+    throw std::runtime_error("Tau FD baseline moment dimensions inconsistent");
+
+  PMatrix<double> gradbuff("tau_fd_gradbuf", nind, 1);
+  auto mode_residual=[&]() -> double {
+    psiinv_in->RightMult(*b_in, &gradbuff);
+    double maxres=0.0;
+    for(size_t i=0;i<nind;++i){
+      const double res = delta_in->GetVal(i) -
+        clambda_in->GetVal(i)*ebx_in->GetVal(i)*std::exp(b_in->GetVal(i)) -
+        gradbuff.GetVal(i)/tau;
+      maxres=std::max(maxres,std::fabs(res));
+    }
+    return maxres;
+  };
+  const double base_mode_residual=mode_residual();
+  vector<double> wm(nind),wp(nind);
+  double side_mode_residual[2]={0.0,0.0};
+  int side_steps[2]={0,0};
+  bool side_converged[2]={false,false};
+  for(int side=0;side<2;++side){
+    const auto side_start=high_resolution_clock::now();
+    const char* side_name=(side==0 ? "minus" : "plus");
+    if(fd_detail) std::cout << "[TAU_FD_STAGE] side=" << side_name
+                          << " starting conditional-mode Newton" << std::endl;
+    tau=tau_saved + (side==0 ? -tau_fd_step : tau_fd_step);
+    b_in->SetData(b_saved);
+    // Newton updates ONLY to the conditional mode at the perturbed tau.
+    // We do not call UpdateBeta, UpdateLambda, or IterateIn.
+    for(int k=0;k<25;++k){
+      UpdateIn_b();
+      ++side_steps[side];
+      double maxstep=0.0;
+      for(size_t i=0;i<nind;++i)
+        maxstep=std::max(maxstep, std::fabs(
+          b_in->GetVal(i)-bprev_in->GetVal(i)));
+      if(fd_detail && (k==0 || (k+1)%5==0))
+        std::cout << "[TAU_FD_STAGE] side=" << side_name
+                  << " newton_steps=" << k+1 << " max_step=" << Log4(maxstep)
+                  << " elapsed_s=" << Log4(duration_cast<nanoseconds>(high_resolution_clock::now()-side_start).count()*1e-9) << std::endl;
+      if(maxstep<1.e-10){ side_converged[side]=true; break; }
+    }
+    side_mode_residual[side]=mode_residual();
+    if(!side_converged[side] || side_mode_residual[side]>1.e-5)
+      throw std::runtime_error("Tau FD conditional b mode failed to converge at perturbed tau");
+    if(fd_detail) std::cout << "[TAU_FD_STAGE] side=" << side_name
+              << " newton_done steps=" << side_steps[side]
+              << " residual=" << Log4(side_mode_residual[side])
+              << " elapsed_s=" << Log4(duration_cast<nanoseconds>(high_resolution_clock::now()-side_start).count()*1e-9) << std::endl;
+    UpdateIn_mus();
+    if(tau_fd_fast_w1) ComputeIn_EV_W1Only();
+    else ComputeIn_EV();
+    if(fd_detail) std::cout << "[TAU_FD_STAGE] side=" << side_name << " posterior_done"
+              << " elapsed_s=" << Log4(duration_cast<nanoseconds>(high_resolution_clock::now()-side_start).count()*1e-9) << std::endl;
+    vector<double>& target=(side==0 ? wm : wp);
+    for(size_t i=0;i<nind;++i){
+      target[i]=w1_in->GetVal(i);
+      if(!std::isfinite(target[i]))
+        throw std::runtime_error("Tau FD nonfinite posterior moment");
+    }
+  }
+
+  if(fd_detail) std::cout << "[TAU_FD_TIMING] two-sided mode/moment calculations: "
+            << Log4(duration_cast<nanoseconds>(high_resolution_clock::now()-fd_wall_start).count()*1e-9)
+            << " s" << std::endl;
+  // Restore the identical fitted tau and conditional mode. In fast mode
+  // no high posterior moments were modified; restore stored baseline W1/mu/
+  // sigma, and verify the fixed-tau posterior mean matches the cached center.
+  // Legacy mode retains its original full center recomputation.
+  tau=tau_saved;
+  b_in->SetData(b_saved);
+  bprev_in->SetData(bprev_saved);
+  UpdateIn_mus();
+  if(tau_fd_fast_w1){
+    ComputeIn_EV_W1Only();
+    double center_gap=0.0;
+    for(size_t i=0;i<nind;++i)
+      center_gap=std::max(center_gap,std::fabs(w1_in->GetVal(i)-w1_saved[i]));
+    if(fd_detail) std::cout << "[TAU_FD_STAGE] center_w1_consistency_max_abs=" << Log4(center_gap) << std::endl;
+    if(!std::isfinite(center_gap) || center_gap>1e-7)
+      throw std::runtime_error("Fast FD center W1 differs from cached Step2 W1; use legacy mode and check -S consistency");
+    w1_in->SetData(w1_saved);
+  }else{
+    ComputeIn_EV();
+  }
+  UpdateIn_ebxw1();
+  double restore_max=0.0, w_fd_l2=0.0, w_gap_l2=0.0, w_analytic_l2=0.0;
+  tau_fd_dw1.assign(nind,0.0);
+  tau_fd_direct_coef.assign(nind,0.0);
+  vector<double> w_deriv_analytic(nind,0.0);
+  vector<size_t> tau_fd_original_block(nind,0), tau_fd_block_size(nind,0);
+  double w_gap_l2_small=0.0, w_gap_l2_large=0.0;
+  size_t n_small=0,n_large=0;
+  for(size_t i=0;i<nind;++i)
+    restore_max=std::max(restore_max,std::fabs(w1_in->GetVal(i)-w1_saved[i]));
+  if(restore_max>1.e-7)
+    throw std::runtime_error("Tau FD restoration changed baseline posterior moments");
+
+  const size_t L=beta->GetNData();
+  const size_t M=T_unq->GetNData();
+  const size_t N=L+M;
+  tau_fd_c.assign(N,0.0);
+  PMatrix<double> p0;
+  PMatrix<double> p1;
+  for(size_t b=0;b<psiinv_in->GetNBlocks();++b){
+    psiinv_in->GetBlock(b,p0);
+    Ebb_in->GetBlock(b,p1);
+    const double ebquad=p0.TraceProductSymm(p1);
+    const size_t off=psiinv_in->GetBlockOffset(b);
+    const size_t size=psiinv_in->GetBlockRows(b);
+    for(size_t k=0;k<size;++k){
+      const size_t i=off+k;
+      tau_fd_original_block[i]=b;
+      tau_fd_block_size[i]=size;
+      const double num=(wp[i]-wm[i])/(2.0*tau_fd_step);
+      const double analytic=(Ebbeb_in->GetVal(i) - w1_in->GetVal(i)*ebquad)/
+                            (2.0*tau_saved*tau_saved);
+      tau_fd_dw1[i]=num;
+      w_deriv_analytic[i]=analytic;
+      tau_fd_direct_coef[i]=clambda_in->GetVal(i)*ebx_in->GetVal(i)*num;
+      w_fd_l2+=num*num;
+      w_gap_l2+=(num-analytic)*(num-analytic);
+      if(size<=2){w_gap_l2_small+=(num-analytic)*(num-analytic); ++n_small;}
+      else {w_gap_l2_large+=(num-analytic)*(num-analytic); ++n_large;}
+      w_analytic_l2+=analytic*analytic;
+      for(size_t j=0;j<L;++j)
+        tau_fd_c[j]+=tau_fd_direct_coef[i]*X_in->GetVal(i,j);
+    }
+  }
+  // Baseline-jump score: U_hj = d_j/h_j - sum_{T_i>=t_j} exp(x_i beta) E(e^bi).
+  // Hence c_fd,j = -dU_hj/dtau = sum_{T_i>=t_j} exp(x_i beta) dw1_i/dtau.
+  //
+  // The previous nested loop scanned every subject for every event time:
+  // O(nind*M). We already have T_in_sort in descending time order and its
+  // permutation T_in_perm from TimeSortData("TimeSortDataIn",...). T_unq is
+  // descending, too. Sweep each subject once, with inclusive >= ties.
+  // This changes only the summation order, not the estimator.
+  const auto fd_riskset_start = high_resolution_clock::now();
+  if(T_in_perm.size() != nind || T_in_sort->GetNData() != nind)
+    throw std::runtime_error("Tau FD riskset: sorted subject/permutation dimensions mismatch");
+  size_t cursor=0;
+  double risk_sum=0.0;
+  for(size_t j=0;j<M;++j){
+    const double tj=T_unq->GetVal(j);
+    if(j>0 && tj>T_unq->GetVal(j-1))
+      throw std::runtime_error("Tau FD riskset: event-time vector is not descending");
+    while(cursor<nind && T_in_sort->GetVal(cursor)>=tj){
+      const size_t original=T_in_perm[cursor];
+      if(original>=nind)
+        throw std::runtime_error("Tau FD riskset: invalid sorted subject index");
+      risk_sum += ebx_in->GetVal(original)*tau_fd_dw1[original];
+      ++cursor;
+    }
+    tau_fd_c[L+j]=risk_sum;
+  }
+  if(fd_detail) std::cout << "[TAU_FD_TIMING] riskset cross-information: "
+                         << Log4(duration_cast<nanoseconds>(high_resolution_clock::now()-fd_riskset_start).count()*1e-9)
+                         << " s (linear sweep, n_ind=" << nind << ", n_event_times=" << M << ")"
+                         << std::endl;
+
+  double max_c_beta=0.,max_c_h=0.,c_analytic_l2=0.,c_fd_l2=0.;
+  if(!prefix.empty()){
+    std::ofstream nuisance((prefix+"_nuisance_fd.tsv").c_str());
+    std::ofstream moments((prefix+"_moments_fd.tsv").c_str());
+    std::ofstream summary((prefix+"_summary.tsv").c_str());
+    if(!nuisance || !moments || !summary)
+      throw std::runtime_error("Cannot open tau FD output files for prefix: "+prefix);
+    nuisance<<std::setprecision(17);
+    moments<<std::setprecision(17);
+    summary<<std::setprecision(17);
+    nuisance<<"parameter\tindex\tI_xi_tau_analytic\tI_xi_tau_fd\tgap\n";
+    for(size_t j=0;j<N;++j){
+      const double val=V_unq_in->GetVal(j,N);
+      const double gap=tau_fd_c[j]-val;
+      nuisance<<(j<L ? "beta" : "h")<<'\t'<<(j<L ? j : j-L)<<'\t'
+              <<val<<'\t'<<tau_fd_c[j]<<'\t'<<gap<<'\n';
+      if(j<L) max_c_beta=std::max(max_c_beta,std::fabs(gap));
+      else max_c_h=std::max(max_c_h,std::fabs(gap));
+      c_analytic_l2+=val*val;
+      c_fd_l2+=tau_fd_c[j]*tau_fd_c[j];
+    }
+    moments<<"subject_index\toriginal_block_id\tblock_size\tw1_baseline\tw1_minus\tw1_plus\tdw1_fd\tdw1_analytic\tdw1_gap\n";
+    for(size_t i=0;i<nind;++i){
+      moments<<i<<'\t'<<tau_fd_original_block[i]<<'\t'<<tau_fd_block_size[i]<<'\t'<<w1_in->GetVal(i)<<'\t'<<wm[i]<<'\t'<<wp[i]<<'\t'
+             <<tau_fd_dw1[i]<<'\t'<<w_deriv_analytic[i]<<'\t'
+             <<tau_fd_dw1[i]-w_deriv_analytic[i]<<'\n';
+    }
+    summary<<"tau\tfd_step\tn_subjects\tn_nuisance\tbaseline_mode_residual"
+              "\tminus_mode_residual\tplus_mode_residual\tminus_nr_steps"
+              "\tplus_nr_steps\tw1_restore_max_abs\tdw1_fd_l2"
+              "\tdw1_analytic_l2\tdw1_difference_l2\tI_xi_tau_beta_gap_max"
+              "\tI_xi_tau_h_gap_max\tI_xi_tau_analytic_l2\tI_xi_tau_fd_l2"
+              "\tn_subjects_block_le2\tn_subjects_block_gt2"
+              "\tdw1_gap_l2_block_le2\tdw1_gap_l2_block_gt2\n";
+    summary<<tau_saved<<'\t'<<tau_fd_step<<'\t'<<nind<<'\t'<<N<<'\t'
+           <<base_mode_residual<<'\t'<<side_mode_residual[0]<<'\t'
+           <<side_mode_residual[1]<<'\t'<<side_steps[0]<<'\t'<<side_steps[1]
+           <<'\t'<<restore_max<<'\t'<<std::sqrt(w_fd_l2)<<'\t'
+           <<std::sqrt(w_analytic_l2)<<'\t'<<std::sqrt(w_gap_l2)
+           <<'\t'<<max_c_beta<<'\t'<<max_c_h<<'\t'
+           <<std::sqrt(c_analytic_l2)<<'\t'<<std::sqrt(c_fd_l2)<<'\t'
+           <<n_small<<'\t'<<n_large<<'\t'<<std::sqrt(w_gap_l2_small)<<'\t'
+           <<std::sqrt(w_gap_l2_large)<<'\n';
+    if(fd_detail) std::cout << "[TAU_FD_AUDIT] tau=" << Log4(tau_saved)
+                          << " step=" << Log4(tau_fd_step)
+                          << " base_mode_residual=" << Log4(base_mode_residual)
+                          << " w1_restore_error=" << Log4(restore_max)
+                          << " dw1_analytic_fd_l2_gap=" << Log4(std::sqrt(w_gap_l2))
+                          << " max_beta_c_gap=" << Log4(max_c_beta)
+                          << " max_h_c_gap=" << Log4(max_c_h) << std::endl;
+    std::cout<<"[TAU_FD] output "<<prefix<<"_{summary,nuisance_fd,moments_fd}.tsv"
+             <<std::endl;
+  }else if(fd_detail){
+    std::cout << "[TAU_FD_AUDIT] w1_restore_error=" << Log4(restore_max)
+              << " dw1_analytic_fd_l2_gap=" << Log4(std::sqrt(w_gap_l2))
+              << std::endl;
+  }
+  // H and q remain analytic. Cross-information is stored separately and
+  // subsequently used in the exact block-sandwich variance when requested.
+  vr_weights_ready=false;
+  residualizer_ready=false;
+  g_projection_ready=false;
+  g_tilde_ready=false;
+  tau_fd_ready=true;
+  std::cout << "[GADO_TAU_CROSS] prepared: tau=" << Log4(tau_saved)
+            << " step=" << Log4(tau_fd_step)
+            << " elapsed_s=" << Log4(duration_cast<nanoseconds>(high_resolution_clock::now()-fd_wall_start).count()*1e-9)
+            << std::endl;
+  if(fd_detail)
+    std::cout << "[TAU_FD_AUDIT] Newton(-/+)=" << side_steps[0] << "/" << side_steps[1]
+              << " max_mode_residual=" << Log4(std::max(side_mode_residual[0],side_mode_residual[1]))
+              << " w1_restore_error=" << Log4(restore_max) << std::endl;
+}
+
+// Validation-only H/q directional Jacobian audit for the *implemented* Step 2
+// approximate estimating equations. Tau and the centered genotype used by the exact score stay fixed.
+// No production score/information or fitted parameters are overwritten on disk.
+// Because the nuisance baseline hazard has many jumps, use directional probes
+// (two beta coordinates, proportional hazard-jump scaling, mixed direction).
+// This checks a few directions, not the full large Jacobian or asymptotic proof.
+void GHAModel::RunHQFDAudit(const string& prefix,double eps){
+#ifndef __CUDA__
+  if(!hq_fd_audit_enabled || prefix.empty())
+    throw std::runtime_error("Hq FD audit not enabled");
+  if(!(std::isfinite(eps) && eps>0.0 && eps<0.1))
+    throw std::runtime_error("Invalid Hq FD half-step");
+  const size_t L=beta->GetNData();
+  const size_t M=T_unq->GetNData();
+  const size_t N=L+M;
+  if(L==0 || M==0 || hq_analytic_q.size()!=N ||
+     !V_unq_in || !G_in || T_in_perm.size()!=nind)
+    throw std::runtime_error("Hq FD audit missing analytic q / Step2 state");
+  const std::vector<double> saved_b=b_in->GetDataConst();
+  const std::vector<double> saved_mu=mu_in->GetDataConst();
+  const std::vector<double> saved_sigma=sigma_in->GetDataConst();
+  const std::vector<double> saved_w=w1_in->GetDataConst();
+  const std::vector<double> saved_ebx=ebx_in->GetDataConst();
+  const std::vector<double> saved_clambda=clambda_in->GetDataConst();
+  // All H/q perturbations keep tau and the centered genotype G_in fixed;
+  // the conditional mode and W1 are recalculated at each side.
+  std::ofstream out(prefix.c_str());
+  if(!out) throw std::runtime_error("Cannot write Hq FD audit: "+prefix);
+  out << std::setprecision(17);
+  out << "direction\tepsilon\tnewton_minus\tnewton_plus"
+         "\tH_fd_l2\tH_analytic_l2\tH_gap_l2\tH_rel_l2"
+         "\tH_beta_rel_l2\tH_hazard_rel_l2\tq_fd\tq_analytic"
+         "\tq_abs_gap\tq_scaled_rel_gap\tstatus_1pct\n";
+
+  std::vector<std::pair<std::string,std::vector<double>>> dirs;
+  std::vector<double> v(N,0.0);
+  v[0]=1.0; dirs.push_back({"beta_first",v});
+  if(L>1){
+    std::fill(v.begin(),v.end(),0.0);
+    v[L-1]=1.0; dirs.push_back({"beta_last",v});
+  }
+  std::fill(v.begin(),v.end(),0.0);
+  for(size_t j=0;j<M;++j) v[L+j]=h_unq_in->GetVal(j);
+  dirs.push_back({"hazard_proportional",v});
+  std::fill(v.begin(),v.end(),0.0);
+  v[0]=0.5;
+  for(size_t j=0;j<M;++j) v[L+j]=0.5*h_unq_in->GetVal(j);
+  dirs.push_back({"beta_hazard_joint",v});
+
+  auto restore=[&](){
+    // PMatrix::SetData requires a mutable vector argument.
+    std::vector<double> x;
+    x=saved_b; b_in->SetData(x);
+    x=saved_mu; mu_in->SetData(x);
+    x=saved_sigma; sigma_in->SetData(x);
+    x=saved_w; w1_in->SetData(x);
+    x=saved_ebx; ebx_in->SetData(x);
+    x=saved_clambda; clambda_in->SetData(x);
+    UpdateIn_ebxw1();
+    vr_weights_ready=false;
+    residualizer_ready=false;
+    g_projection_ready=false;
+    g_tilde_ready=false;
+  };
+
+  size_t failures=0;
+  try{
+    for(const auto& dir:dirs){
+      const auto& vv=dir.second;
+      // Every hazard component is scaled by the same relative factor.
+      double hazard_scale=0.0;
+      for(size_t j=0;j<M;++j){
+        const double hj=h_unq_in->GetVal(j);
+        if(!(std::isfinite(hj) && hj>0))
+          throw std::runtime_error("Hq FD: invalid fitted baseline hazard jump");
+        if(std::fabs(vv[L+j])>0.0){
+          hazard_scale=vv[L+j]/hj;
+          break;
+        }
+      }
+      for(size_t j=0;j<M;++j){
+        const double hj=h_unq_in->GetVal(j);
+        if(std::fabs(vv[L+j]-hazard_scale*hj)>1e-12*std::max(1.0,std::fabs(hj)))
+          throw std::runtime_error("Hq FD: hazard direction must be proportional to jumps");
+      }
+      std::vector<double> scores[2];
+      double gscore[2]={0.0,0.0};
+      int newton_count[2]={0,0};
+      for(int side=0;side<2;++side){
+        const double signed_eps=(side==0 ? -eps : eps);
+        const double hazard_multiplier=1.0+signed_eps*hazard_scale;
+        if(hazard_multiplier<=0.0)
+          throw std::runtime_error("Hq FD hazard perturbation not positive");
+        std::vector<double> work=saved_b;
+        b_in->SetData(work);
+        for(size_t i=0;i<nind;++i){
+          double dbeta=0.0;
+          for(size_t j=0;j<L;++j) dbeta+=X_in->GetVal(i,j)*vv[j];
+          ebx_in->SetVal(i,saved_ebx[i]*std::exp(signed_eps*dbeta));
+          clambda_in->SetVal(i,saved_clambda[i]*hazard_multiplier);
+        }
+        bool converged=false;
+        for(int step=0;step<30;++step){
+          UpdateIn_b();
+          ++newton_count[side];
+          double maxstep=0.0;
+          for(size_t i=0;i<nind;++i)
+            maxstep=std::max(maxstep,std::fabs(b_in->GetVal(i)-bprev_in->GetVal(i)));
+          if(maxstep<1e-10){converged=true;break;}
+        }
+        if(!converged)
+          throw std::runtime_error("Hq FD perturbed mode failed 30 Newton iterations");
+        UpdateIn_mus();
+        ComputeIn_EV_W1Only();
+        scores[side].assign(N,0.0);
+        gscore[side]=0.0;
+        std::vector<double> weighted(nind,0.0);
+        for(size_t i=0;i<nind;++i){
+          weighted[i]=ebx_in->GetVal(i)*w1_in->GetVal(i);
+          const double residual=delta_in->GetVal(i)-clambda_in->GetVal(i)*weighted[i];
+          gscore[side]+=G_in->GetVal(i)*residual;
+          for(size_t j=0;j<L;++j) scores[side][j]+=X_in->GetVal(i,j)*residual;
+        }
+        size_t cursor=0;
+        double risk=0.0;
+        for(size_t j=0;j<M;++j){
+          const double tj=T_unq->GetVal(j);
+          double events=0.0;
+          while(cursor<nind && T_in_sort->GetVal(cursor)>=tj){
+            const size_t idx=T_in_perm[cursor];
+            risk+=weighted[idx];
+            if(T_in_sort->GetVal(cursor)==tj) events+=delta_in->GetVal(idx);
+            ++cursor;
+          }
+          scores[side][L+j]=events/(h_unq_in->GetVal(j)*hazard_multiplier)-risk;
+        }
+      }
+      std::vector<double> hv(N,0.0), fd(N,0.0);
+      double sum_ha=0.0,sum_hf=0.0,sum_gap=0.0;
+      double beta_gap=0.,beta_scale=0.,haz_gap=0.,haz_scale=0.;
+      for(size_t i=0;i<N;++i){
+        for(size_t j=0;j<N;++j) hv[i]+=V_unq_in->GetVal(i,j)*vv[j];
+        fd[i]=-(scores[1][i]-scores[0][i])/(2.0*eps);
+        const double gap=fd[i]-hv[i];
+        sum_ha+=hv[i]*hv[i]; sum_hf+=fd[i]*fd[i]; sum_gap+=gap*gap;
+        if(i<L){beta_gap+=gap*gap;beta_scale+=std::max(fd[i]*fd[i],hv[i]*hv[i]);}
+        else{haz_gap+=gap*gap;haz_scale+=std::max(fd[i]*fd[i],hv[i]*hv[i]);}
+      }
+      const double qfd=-(gscore[1]-gscore[0])/(2.0*eps);
+      double qa=0.; for(size_t j=0;j<N;++j) qa+=hq_analytic_q[j]*vv[j];
+      const double hrel=std::sqrt(sum_gap)/std::max(1.0,std::sqrt(std::max(sum_ha,sum_hf)));
+      const double brel=std::sqrt(beta_gap)/std::max(1.0,std::sqrt(beta_scale));
+      const double jrel=std::sqrt(haz_gap)/std::max(1.0,std::sqrt(haz_scale));
+      const double qrel=std::fabs(qfd-qa)/std::max(1.0,std::max(std::fabs(qfd),std::fabs(qa)));
+      // Practical screening threshold only; NOT a theorem or final calibration test.
+      const bool pass=std::isfinite(hrel)&&std::isfinite(qrel)&&hrel<=0.01&&qrel<=0.01;
+      if(!pass) ++failures;
+      out<<dir.first<<'\t'<<eps<<'\t'<<newton_count[0]<<'\t'<<newton_count[1]
+         <<'\t'<<std::sqrt(sum_hf)<<'\t'<<std::sqrt(sum_ha)
+         <<'\t'<<std::sqrt(sum_gap)<<'\t'<<hrel<<'\t'<<brel<<'\t'<<jrel
+         <<'\t'<<qfd<<'\t'<<qa<<'\t'<<std::fabs(qfd-qa)
+         <<'\t'<<qrel<<'\t'<<(pass?"PASS":"FAIL")<<'\n';
+      std::cout << "[GADO_HQ_AUDIT] direction="<<dir.first
+                << " H_rel="<<Log4(hrel)<<" q_rel="<<Log4(qrel)
+                << " screening="<<(pass?"PASS":"FAIL")<<std::endl;
+    }
+  }catch(...){restore();throw;}
+  restore();
+  out.close();
+  std::cout << "[GADO_HQ_AUDIT] completed="<<dirs.size()
+            << " screening_failures="<<failures<<" output="<<prefix
+            << "; not an asymptotic proof"<<std::endl;
+  if(failures) std::cout << "[GADO_HQ_AUDIT] WARNING: H/q screening failed; do not certify release" << std::endl;
+#else
+  throw std::runtime_error("H/q FD Jacobian audit not supported by CUDA build");
+#endif
+}
+
 void GHAModel::Solve(size_t maxiterap, size_t maxiterin){
   auto t0 = high_resolution_clock::now();
   SetSeedsAP();
-  if(maxiterap == 0) converged_ap = IterateAP(SIZE_MAX);
-  else converged_ap = IterateAP(maxiterap);
+  if(fixed_tau_mode){
+    if(!std::isfinite(fixed_tau_value) || fixed_tau_value <= 0.0)
+      throw std::runtime_error("Experimental fixed tau must be positive/finite");
+    tau = fixed_tau_value;
+    tauprev = tau;
+    tau_iter.assign(1, tau);
+    // Step 1 is intentionally NOT estimated. Step 2 will be fitted with
+    // this known variance component. Asc must be zero in score variance.
+    converged_ap = true;
+    cout << "[EXPERIMENT_FIXED_TAU] Step 1 skipped; known tau="
+         << Log4(tau) << endl;
+  }else{
+    if(maxiterap == 0) converged_ap = IterateAP(SIZE_MAX);
+    else converged_ap = IterateAP(maxiterap);
+  }
   auto t1 = high_resolution_clock::now();
   cout << endl << "Step 1 solution after " << niterations << " iterations, "
-       << duration_cast<nanoseconds>(t1-t0).count()*1.0e-9 << " s:" << endl;
+       << Log4(duration_cast<nanoseconds>(t1-t0).count()*1.0e-9) << " s:" << endl;
   beta->Print(beta->GetNData(), 4, "    ");
-  cout << "tau = " << tau << endl << endl;
+  cout << "tau = " << Log4(tau) << endl << endl;
   for(auto& pr : titer_us)
     if(pr.second != 0.0){
-      cout << pr.first << ":  " << pr.second << " us  "
-	   << pr.second/niterations << " us/iter" << endl;
+      cout << pr.first << ":  " << Log4(pr.second) << " us  "
+	   << Log4(pr.second/std::max<size_t>(1,niterations)) << " us/iter" << endl;
       pr.second = 0.0;
     }
   beta0->SetData(beta->GetData());
@@ -2839,13 +3250,13 @@ void GHAModel::Solve(size_t maxiterap, size_t maxiterin){
   else converged_in = IterateIn(maxiterin);
   t1 = high_resolution_clock::now();
   cout << endl << "Step 2 solution after " << niterations << " iterations, "
-       << duration_cast<nanoseconds>(t1-t0).count()*1.0e-9 << " s:" << endl;
+       << Log4(duration_cast<nanoseconds>(t1-t0).count()*1.0e-9) << " s:" << endl;
   beta->Print(beta->GetNData(), 4, "    ");
-  cout << "tau = " << tau << endl << endl;
+  cout << "tau = " << Log4(tau) << endl << endl;
   for(auto& pr : titer_us)
     if(pr.second != 0.0){
-      cout << pr.first << ":  " << pr.second << " us  "
-	   << pr.second/niterations << " us/iter" << endl;
+      cout << pr.first << ":  " << Log4(pr.second) << " us  "
+	   << Log4(pr.second/std::max<size_t>(1,niterations)) << " us/iter" << endl;
       pr.second = 0.0;
     }
   beta1->SetData(beta->GetData());
@@ -2853,6 +3264,110 @@ void GHAModel::Solve(size_t maxiterap, size_t maxiterin){
   niterations_in = niterations;
 }
 
+
+
+// Diagnostic only: emit Step 1 IF by *original* GRM block. Can be called
+// after reading an existing -S score/info file. Cached -S does not guarantee
+// that raw Step 1 scores U_beta, U_h and U_tau are present: report NA unless
+// ScoreInfoAP() was executed in this process.
+void GHAModel::WriteTauIFAudit(const string& prefix) const{
+  if(!Asc || !psiinv_in || Asc->GetNData()!=psiinv_in->GetNBlocks())
+    throw std::runtime_error("Tau IF audit requires original-block Asc from Step 1 score/info");
+  std::ofstream summary((prefix + "_step1_summary.tsv").c_str());
+  std::ofstream blocks((prefix + "_step1_blocks.tsv").c_str());
+  if(!summary || !blocks)
+    throw std::runtime_error("Unable to create tau IF audit files for prefix: " + prefix);
+  summary << std::setprecision(17);
+  blocks << std::setprecision(17);
+  const size_t nblocks = psiinv_in->GetNBlocks();
+  vector<size_t> pseudo_counts(nblocks,0);
+  for(size_t i=0;i<LM.size();++i){
+    if(LM[i]>=nblocks) throw std::runtime_error("Invalid LM original-block mapping");
+    ++pseudo_counts[LM[i]];
+  }
+  double sumA2=0.0, sumA=0.0, maxAbsA=0.0;
+  size_t largestA=0, nonzeroA=0;
+  vector<size_t> ranked(nblocks,0);
+  for(size_t i=0;i<nblocks;++i){
+    ranked[i]=i;
+    const double a=Asc->GetVal(i);
+    if(!std::isfinite(a)) throw std::runtime_error("Non-finite Asc in tau IF audit");
+    sumA+=a;
+    sumA2+=a*a;
+    if(a!=0.0) ++nonzeroA;
+    if(std::fabs(a)>maxAbsA){maxAbsA=std::fabs(a);largestA=i;}
+  }
+  std::sort(ranked.begin(),ranked.end(),[this](size_t a,size_t b){
+    return std::fabs(Asc->GetVal(a))>std::fabs(Asc->GetVal(b));
+  });
+  const size_t N=(Vinv_unq && Vinv_unq->GetNRows()>0) ?
+      Vinv_unq->GetNRows()-1 : 0;
+  const double tau_inv_diag=(Vinv_unq && Vinv_unq->GetNRows()>0) ?
+      Vinv_unq->GetVal(N,N) : std::numeric_limits<double>::quiet_NaN();
+  // For an exact inverse of the Step 1 information, this reciprocal is the
+  // Schur complement after profiling out beta and baseline hazards.
+  const bool schur_ok=!fixed_tau_mode && std::isfinite(tau_inv_diag) &&
+      tau_inv_diag!=0.0;
+  const double tau_schur=schur_ok ? 1.0/tau_inv_diag :
+      std::numeric_limits<double>::quiet_NaN();
+  double beta_l2=0, beta_max=0, h_l2=0, h_max=0, h_times_score_max=0;
+  if(ap_scores_fresh){
+    for(size_t i=0;i<Ubeta->GetNData();++i){
+      const double x=Ubeta->GetVal(i);
+      beta_l2+=x*x; beta_max=std::max(beta_max,std::fabs(x));
+    }
+    beta_l2=std::sqrt(beta_l2);
+    if(Uh_unq && h_unq && Uh_unq->GetNData()==h_unq->GetNData())
+      for(size_t i=0;i<Uh_unq->GetNData();++i){
+        const double x=Uh_unq->GetVal(i);
+        h_l2+=x*x; h_max=std::max(h_max,std::fabs(x));
+        h_times_score_max=std::max(h_times_score_max,
+             std::fabs(x*h_unq->GetVal(i)));
+      }
+    h_l2=std::sqrt(h_l2);
+  }
+  summary << "tau\tn_original_blocks\tn_pseudo_blocks\tn_nonzero_Asc"
+          << "\tsum_Asc\tsum_Asc2\tsqrt_sum_Asc2\tmax_abs_Asc\tmax_abs_Asc_block_id"
+          << "\tAP_schur_available\tAP_inv_tau_tau\tAP_schur_tau"
+          << "\tAP_scores_fresh\tU_tau\tU_beta_l2\tU_beta_maxabs"
+          << "\tU_h_l2\tU_h_maxabs\tmax_abs_h_times_Uh\n";
+  summary << tau << '\t' << nblocks << '\t' << LM.size() << '\t' << nonzeroA
+          << '\t' << sumA << '\t' << sumA2 << '\t' << std::sqrt(sumA2)
+          << '\t' << maxAbsA << '\t' << largestA << '\t'
+          << (schur_ok?"1":"0") << '\t';
+  if(schur_ok) summary << tau_inv_diag << '\t' << tau_schur;
+  else summary << "NA\tNA";
+  summary << '\t' << (ap_scores_fresh?"1":"0") << '\t';
+  if(ap_scores_fresh)
+    summary << utau << '\t' << beta_l2 << '\t' << beta_max << '\t'
+            << h_l2 << '\t' << h_max << '\t' << h_times_score_max;
+  else summary << "NA\tNA\tNA\tNA\tNA\tNA";
+  summary << '\n';
+  blocks << "original_block_id\tblock_offset\tblock_size\tevents"
+         << "\tpseudo_blocks_from_original\tAsc\tAsc_squared"
+         << "\tAsc_squared_fraction\tabs_Asc_rank\n";
+  vector<size_t> rank(nblocks,0);
+  for(size_t j=0;j<ranked.size();++j) rank[ranked[j]]=j+1;
+  for(size_t i=0;i<nblocks;++i){
+    const size_t offset=psiinv_in->GetBlockOffset(i);
+    const size_t n=psiinv_in->GetBlockRows(i);
+    size_t events=0;
+    for(size_t j=0;j<n;++j) if(delta_in->GetVal(offset+j)>0.0) ++events;
+    const double a=Asc->GetVal(i);
+    blocks << i << '\t' << offset << '\t' << n << '\t' << events
+           << '\t' << pseudo_counts[i] << '\t' << a << '\t' << a*a
+           << '\t' << (sumA2>0.0?a*a/sumA2:0.0)
+           << '\t' << rank[i] << '\n';
+  }
+  std::cout << "[TAU_IF_AUDIT] tau=" << Log4(tau)
+            << " sum_Asc2=" << Log4(sumA2) << " sqrt_sum_Asc2=" << Log4(std::sqrt(sumA2))
+            << " top_block=" << largestA << " max_abs_Asc=" << Log4(maxAbsA)
+            << " schur_tau=";
+  if(schur_ok) std::cout << Log4(tau_schur); else std::cout << "NA";
+  std::cout << " Step1_scores_fresh=" << (ap_scores_fresh?"yes":"no")
+            << "\n[TAU_IF_AUDIT] files: " << prefix << "_step1_summary.tsv, "
+            << prefix << "_step1_blocks.tsv" << std::endl;
+}
 
 void GHAModel::SetG(PMatrix<double>* g){
   auto t0 = high_resolution_clock::now();
@@ -2927,6 +3442,7 @@ void GHAModel::SetG(PMatrix<double>* g){
     
   g_projection_ready = false;
   g_tilde_ready      = false;
+  g_working_var     = numeric_limits<double>::quiet_NaN();
   auto t1 = high_resolution_clock::now();
   titer_ist_us["SetG"] = duration_cast<nanoseconds>(t1-t0).count()*1.0e-3;
 }
@@ -2935,7 +3451,34 @@ void GHAModel::SetG(PMatrix<double>* g){
 void GHAModel::ComputeScoreInfo(){
   auto t0 = high_resolution_clock::now();
   cout << "Computing AP score and information..." << endl;
-  ScoreInfoAP();
+  if(fixed_tau_mode){
+    // Fixed-tau experiment: Step 1 is NOT estimated. Initialize the
+    // shared event-time grid and AP-shaped placeholders needed by the
+    // original Step 2 / influence-code paths. No AP score fitting.
+    UpdateCLambda("UpdateAP_clambda", T_perm_t, lambda, clambda, T_sort);
+    auto uniq = UpdateUnique("UpdateUniqueAP", index_unq,
+                             delta_sort, T_sort, T_unq, lambda, h_unq);
+    T_unq = uniq.first;
+    h_unq = uniq.second;
+    const size_t n_nuis = T_unq->GetNData() + beta->GetNData();
+    if(V_unq) delete V_unq;
+    if(Vinv_unq) delete Vinv_unq;
+    V_unq = new PMatrix<double>("V_unq_known_tau", n_nuis+1,n_nuis+1);
+    Vinv_unq = new PMatrix<double>("Vinv_unq_known_tau",n_nuis+1,n_nuis+1);
+    V_unq->Zero();
+    Vinv_unq->Zero();
+    Asc->Zero();
+    utau = 0.0;
+    Ubeta->Zero();
+    if(Uh_unq) delete Uh_unq;
+    Uh_unq = new PMatrix<double>("Uh_unq_known_tau",T_unq->GetNData(),1);
+    Uh_unq->Zero();
+    cout << "[EXPERIMENT_FIXED_TAU] Asc=0, known tau=" << tau
+         << "; initialized shared matrices without AP influence"
+         << "; NOT for production inference" << endl;
+  }else{
+    ScoreInfoAP();
+  }
   auto t1 = high_resolution_clock::now();
   cout << duration_cast<nanoseconds>(t1-t0).count()*1.0e-9 << " s" << endl;
   cout << "U_tau: " << utau << endl;
@@ -2981,37 +3524,48 @@ void GHAModel::ComputeScoreInfo(){
 
 void GHAModel::ComputeScoreTest(bool print){
   auto t0 = high_resolution_clock::now();
-  if(print) cout << "Computing score test, MAC="
-		 << MAC << ", MAF=" << MAF
-		 << ", MAF bin=" << vr_bin << "  ...  ";
   niterations ++;
   ugamma      = 0.0;
   ugamma_cent = 0.0;
   ugamma_var  = 0.0;
+  vr_audit_record = VRAuditRecord();
   const size_t L = beta->GetNData();
   const size_t M = T_unq->GetNData();
   const size_t N = T_unq->GetNData() + beta->GetNData();
+  // Keep the original association score definition on centered G_in.
+  // Build G_tilde only for the cheap VR working variance and SPA CGF.
+  // This deliberately separates the exact estimating equation from the
+  // working approximation used for VR/SPA.
+  BuildResidualizedG();
+  if(!g_tilde_ready)
+    throw std::runtime_error("Residualized working genotype was not initialized");
+
   buffvec_in->Zero();
-  // compute ugamma
-  for(size_t i=0; i<delta_in->GetNData(); i++)
+  for(size_t i=0; i<delta_in->GetNData(); ++i)
     buffvec_in->SetVal(i, delta_in->GetVal(i) -
-			clambda_in->GetVal(i)*ebxw1_in->GetVal(i));
-  vector<double> utG, utcG;
-  StridedInnerProduct(buffvec_in, G_in, psiinv_in->GetBlockRows(), utG,
-		      0.0, 0.0, bnorm_ugamma);
-  double ug_mean = accumulate(buffvec_in->GetData().begin(),
-			      buffvec_in->GetData().end(), 0.0);
-  ug_mean /= buffvec_in->GetNData();
-  for(size_t i=0; i<buffvec_in->GetNData(); i++)
-    buffvec_in->SetVal(i, buffvec_in->GetVal(i) - ug_mean);
-  StridedInnerProduct(buffvec_in, G_in, psiinv_in->GetBlockRows(), utcG,
-		      0.0, (centralize_G ? G_mean : 0.0), bnorm_ugamma);
-  // get the ugamma's from the strided products
-  ugamma      = accumulate(utG.begin(),  utG.end(),  0.0);
-  ugamma_cent = accumulate(utcG.begin(), utcG.end(), 0.0);
+      clambda_in->GetVal(i)*ebxw1_in->GetVal(i));
+
+  vector<double> utG;
+  StridedInnerProduct(buffvec_in, G_in, psiinv_in->GetBlockRows(),
+                      utG, 0.0, 0.0, bnorm_ugamma);
+  ugamma = accumulate(utG.begin(), utG.end(), 0.0);
+
+  // Diagnostic only: the SPA/VR working score should be numerically close
+  // to the exact centered-G score when the nuisance equations are solved.
+  if(vr_diagnostics){
+    vector<double> residualized_block_score;
+    StridedInnerProduct(buffvec_in, G_tilde_in, psiinv_in->GetBlockRows(),
+                        residualized_block_score, 0.0, 0.0, bnorm_ugamma);
+    ugamma_cent = accumulate(residualized_block_score.begin(),
+                             residualized_block_score.end(), 0.0);
+    cout << "[SCORE_SCALE] MAF=" << Log4(MAF)
+         << " U_exact_centered=" << Log4(ugamma)
+         << " U_working_residualized=" << Log4(ugamma_cent)
+         << " delta=" << Log4(ugamma_cent - ugamma) << endl;
+  }
   // decide whether to perform the full calculation
   bool full_calc = true;
-  if(use_var_ratio && vr_bin < var_ratio_found.size() &&
+  if(!vr_audit_enabled && use_var_ratio && vr_bin < var_ratio_found.size() &&
      var_ratio_found[vr_bin]){
     full_calc = false;
     ugamma_var = ComputeVarRatio();
@@ -3020,8 +3574,27 @@ void GHAModel::ComputeScoreTest(bool print){
       ugamma_var = 0.0;
     }
   }
+  // Prepare FD lazily if a tagged precomputed VR required no up-front FD,
+  // but this specific variant needs exact block-sandwich variance.
+  if(full_calc && tau_fd_cross_enabled && !tau_fd_ready){
+    std::cout << "[GADO_TAU_CROSS] Exact-variance fallback: computing derivative once." << std::endl;
+    PrepareTauFD("");
+    // PrepareTauFD intentionally invalidates the working-weight cache.
+    // Rebuild it for the current SNP before computing the exact variance/SPA.
+    BuildResidualizedG();
+    if(!g_tilde_ready)
+      throw std::runtime_error("Residualized working genotype unavailable after tau FD preparation");
+  }
   // perform the full variance calculation if necessary
   if(full_calc){
+    double audit_raw = 0.0;
+    double audit_cross = 0.0;
+    double audit_correction = 0.0;
+    double audit_no_tau_corr = 0.0;
+    double audit_sum_asc2_scaled = 0.0;
+    double audit_sum_v_asc_scaled = 0.0;
+    double audit_max_tau_squared_block = 0.0;
+    double audit_max_block_contribution = 0.0;
     bool d = false;
     size_t k = 0, r = 0, v = 0;
     double tmp0 = 0.0, tmp1 = 0.0, tmp2 = 0.0;
@@ -3046,6 +3619,7 @@ void GHAModel::ComputeScoreTest(bool print){
     }
     Stmp   = new PMatrix<double>("Stmp",     N, 1);
     I_G    = new PMatrix<double>("I_G",    N+1, 1);
+    I_G->Zero();
     Gi     = new PMatrix<double>();
     block0 = new PMatrix<double>();
     block1 = new PMatrix<double>();
@@ -3164,11 +3738,98 @@ void GHAModel::ComputeScoreTest(bool print){
 	}
 	offset += n;
       }
+      // Experimental cross-information pathway: replace only the last row
+      // of SNP-to-nuisance information with the derivative of the IMPLEMENTED
+      // approximate score at fixed beta/Lambda. Do not change the nuisance
+      // information H or the original stored V_unq_in matrix.
+      if(hq_fd_audit_enabled){
+        hq_analytic_q.assign(N,0.0);
+        for(size_t t=0;t<N;++t) hq_analytic_q[t]=I_G->GetVal(t);
+      }
+      const double audit_I_gamma_tau_analytic_raw = I_G->GetVal(N);
+      if(tau_fd_cross_enabled){
+        if(!tau_fd_ready || tau_fd_direct_coef.size()!=nind || tau_fd_c.size()!=N)
+          throw std::runtime_error("Experimental tau FD cross requires PrepareTauFD and matching dimensions");
+        double direct_fd = 0.0;
+        for(size_t ii=0; ii<nind; ++ii)
+          direct_fd += G_in->GetVal(ii)*tau_fd_direct_coef[ii];
+        if(!std::isfinite(direct_fd))
+          throw std::runtime_error("Experimental tau FD direct information is nonfinite");
+        I_G->SetVal(N,direct_fd);
+      }
+      // Diagnostic-only projection of the *entire* tau-estimation influence
+      // through the nuisance block. Simply dropping Stheta[N]*I_G[N]
+      // is wrong: tau also contributes to the first N entries via
+      // -Asc_b * Vinv_unq_in * V_unq_in[0:N,N].
+      double audit_tau_adjust_coeff = 0.0;
+      double audit_tau_projection_analytic = 0.0;
+      double audit_tau_projection_fd_c = std::numeric_limits<double>::quiet_NaN();
+      double audit_I_gamma_tau_fd = std::numeric_limits<double>::quiet_NaN();
+#ifndef __CUDA__
+      if(vr_audit_enabled){
+        audit_tau_adjust_coeff = I_G->GetVal(N);
+        for(size_t row=0;row<N;++row){
+          double beta_lambda_projection=0.0;
+          for(size_t col=0;col<N;++col)
+            beta_lambda_projection += Vinv_unq_in->GetVal(row,col) *
+                (tau_fd_cross_enabled ? tau_fd_c[col] :
+                                          V_unq_in->GetVal(col,N));
+          audit_tau_adjust_coeff -= beta_lambda_projection * I_G->GetVal(row);
+          audit_tau_projection_analytic += beta_lambda_projection * I_G->GetVal(row);
+        }
+        vr_audit_record.I_gamma_tau_analytic=audit_I_gamma_tau_analytic_raw;
+        // Preserve the historic 'analytic projection' field as analytic,
+        // even though the experimental correction uses FD c.
+        if(tau_fd_cross_enabled){
+          audit_tau_projection_analytic=0.0;
+          for(size_t row=0; row<N; ++row){
+            double orig_proj=0.0;
+            for(size_t col=0; col<N; ++col)
+              orig_proj += Vinv_unq_in->GetVal(row,col) *
+                           V_unq_in->GetVal(col,N);
+            audit_tau_projection_analytic += orig_proj*I_G->GetVal(row);
+          }
+        }
+        vr_audit_record.tau_projection_analytic=audit_tau_projection_analytic;
+        if(tau_fd_ready){
+          if(tau_fd_direct_coef.size()!=nind || tau_fd_c.size()!=N)
+            throw std::runtime_error("Tau FD dimensions do not match SNP audit");
+          audit_I_gamma_tau_fd=0.0;
+          for(size_t i=0;i<nind;++i)
+            audit_I_gamma_tau_fd += G_in->GetVal(i)*tau_fd_direct_coef[i];
+          audit_tau_projection_fd_c=0.0;
+          for(size_t row=0;row<N;++row){
+            double bpc=0.0;
+            for(size_t col=0;col<N;++col)
+              bpc+=Vinv_unq_in->GetVal(row,col)*tau_fd_c[col];
+            audit_tau_projection_fd_c+=I_G->GetVal(row)*bpc;
+          }
+          vr_audit_record.I_gamma_tau_fd=audit_I_gamma_tau_fd;
+          vr_audit_record.tau_projection_fd_c=audit_tau_projection_fd_c;
+          vr_audit_record.h_tau_fd_c=audit_I_gamma_tau_fd-audit_tau_projection_fd_c;
+          vr_audit_record.I_gamma_tau_gap=
+            audit_I_gamma_tau_fd-audit_I_gamma_tau_analytic_raw;
+          vr_audit_record.h_tau_fd_c_gap=
+            vr_audit_record.h_tau_fd_c-audit_tau_adjust_coeff;
+          if(tau_fd_cross_enabled &&
+             std::fabs(vr_audit_record.h_tau_fd_c-audit_tau_adjust_coeff) >
+               1.e-7*std::max(1.,std::fabs(audit_tau_adjust_coeff)))
+            throw std::runtime_error("Experimental tau FD h mismatch with independent FD audit");
+        }
+      }
+#endif
       // compute S_theta
       for(size_t i=0; i<psiinv_in->GetNBlocks(); i++){
 	if(use_cache) Stheta = Stheta_cache[i];
 	else{
 	  V_unq_in->GetBlock(0, N, Stmp);
+        if(tau_fd_cross_enabled){
+          // FD nuisance-to-tau cross-information, with H^{-1} unchanged.
+          // The original matrix V_unq_in remains unchanged for diagnostics
+          // and score-info output. Stheta_cache stores this corrected vector.
+          for(size_t z=0; z<N; ++z)
+            Stmp->SetVal(z,tau_fd_c[z]);
+        }
 	  *Stmp *= -Asc->GetVal(i);
 	  for(size_t j=0; j<psiinv_in->GetBlockRows(i); (j++, k++)){
 	    d = delta_in->GetVal(k) != 0.0;
@@ -3197,7 +3858,48 @@ void GHAModel::ComputeScoreTest(bool print){
 	    gStheta->SetVal(l, i, Stheta->GetVal(l));
 #endif	
 	}
-	tmp2 = utG[i] - Stheta->InnerColProduct(0, 0, *I_G);
+	const double correction_i = Stheta->InnerColProduct(0, 0, *I_G);
+	tmp2 = utG[i] - correction_i;
+#ifndef __CUDA__
+        if(vr_audit_enabled){
+          const double scale = bnorm_ugamma ?
+            sqrt(static_cast<double>(psiinv_in->GetBlockRows(i))) : 1.0;
+          audit_raw += utG[i]*utG[i]/scale;
+          audit_cross += utG[i]*correction_i/scale;
+          audit_correction += correction_i*correction_i/scale;
+          const double tau_correction_i =
+            Asc->GetVal(i) * audit_tau_adjust_coeff;
+          const double no_tau = tmp2 + tau_correction_i;
+          audit_no_tau_corr += no_tau*no_tau/scale;
+          const double asc = Asc->GetVal(i);
+          audit_sum_asc2_scaled += asc*asc/scale;
+          audit_sum_v_asc_scaled += no_tau*asc/scale;
+          const double tau_block_squared =
+              tau_correction_i*tau_correction_i/scale;
+          if(tau_block_squared > audit_max_tau_squared_block){
+            audit_max_tau_squared_block = tau_block_squared;
+            vr_audit_record.top_tau_block_id = static_cast<long long>(i);
+            vr_audit_record.top_tau_block_size = psiinv_in->GetBlockRows(i);
+            const size_t base = psiinv_in->GetBlockOffset(i);
+            size_t n_events = 0;
+            for(size_t s=0; s<psiinv_in->GetBlockRows(i); ++s)
+              if(delta_in->GetVal(base+s)>0.0) ++n_events;
+            vr_audit_record.top_tau_block_events = n_events;
+          }
+          const double block_var = tmp2*tmp2/scale;
+          if(block_var > audit_max_block_contribution){
+            audit_max_block_contribution = block_var;
+            vr_audit_record.dominant_block_id = static_cast<long long>(i);
+            const size_t bsize = psiinv_in->GetBlockRows(i);
+            const size_t boffset = psiinv_in->GetBlockOffset(i);
+            size_t events = 0;
+            for(size_t k=0; k<bsize; ++k)
+              if(delta_in->GetVal(boffset+k)>0.0) ++events;
+            vr_audit_record.dominant_block_size = bsize;
+            vr_audit_record.dominant_block_events = events;
+          }
+        }
+#endif
 	ugamma_var += tmp2 * tmp2 / (bnorm_ugamma ?
 				     sqrt(psiinv_in->GetBlockRows(i)) : 1.0);
 	if(use_cache) Stheta = NULL;
@@ -3221,28 +3923,131 @@ void GHAModel::ComputeScoreTest(bool print){
     if(Gi)     delete Gi;
     if(block0) delete block0;
     if(block1) delete block1;
+#ifndef __CUDA__
+    if(vr_audit_enabled){
+      vr_audit_record.valid = true;
+      vr_audit_record.raw = audit_raw;
+      vr_audit_record.cross = audit_cross;
+      vr_audit_record.correction = audit_correction;
+      vr_audit_record.exact = ugamma_var;
+      vr_audit_record.no_tau_correction = audit_no_tau_corr;
+      vr_audit_record.tau_adjust_coeff = audit_tau_adjust_coeff;
+      vr_audit_record.sum_asc2_scaled = audit_sum_asc2_scaled;
+      vr_audit_record.sum_v_asc_scaled = audit_sum_v_asc_scaled;
+      vr_audit_record.tau_cross_term =
+          -2.0*audit_tau_adjust_coeff*audit_sum_v_asc_scaled;
+      vr_audit_record.tau_squared_term =
+          audit_tau_adjust_coeff*audit_tau_adjust_coeff*audit_sum_asc2_scaled;
+      vr_audit_record.tau_decomposition_error = std::fabs(
+          ugamma_var - (audit_no_tau_corr +
+              vr_audit_record.tau_cross_term +
+              vr_audit_record.tau_squared_term));
+      vr_audit_record.top_tau_block_fraction =
+          vr_audit_record.tau_squared_term>0.0 ?
+          audit_max_tau_squared_block/vr_audit_record.tau_squared_term : 0.0;
+      vr_audit_record.working = g_working_var;
+      vr_audit_record.ratio = g_working_var>0.0 ?
+         ugamma_var/g_working_var : 0.0;
+      vr_audit_record.algebra_error = std::fabs(
+          ugamma_var - (audit_raw - 2.0*audit_cross + audit_correction));
+      vr_audit_record.dominant_block_fraction = ugamma_var>0.0 ?
+         audit_max_block_contribution/ugamma_var : 0.0;
+      // Weighted score-orthogonality residual scaled to [0,1] in exact
+      // arithmetic (Cauchy-Schwarz), for [intercept, X] nuisance columns.
+      const size_t q = X_in->GetNCols()+1;
+      for(size_t j=0; j<q; ++j){
+        double weighted_dot=0.0, cov_norm2=0.0;
+        for(size_t k=0; k<nind; ++k){
+          const double x = (j==0 ? 1.0 : X_in->GetVal(k,j-1));
+          const double w = ub_in->GetVal(k);
+          weighted_dot += w*x*G_tilde_in->GetVal(k);
+          cov_norm2 += w*x*x;
+        }
+        if(cov_norm2>0.0 && g_working_var>0.0)
+          vr_audit_record.orthogonality_max = std::max(
+            vr_audit_record.orthogonality_max,
+            std::fabs(weighted_dot)/std::sqrt(cov_norm2*g_working_var));
+      }
+      // PSD heuristic only: C=(1-rho)I+rho*GRM, rho=tau/(1+tau).
+      // This is NOT the derived frailty score covariance; for diagnostics
+      // and held-out comparison ONLY, never for a production p-value.
+      const double rho = tau/(1.0+tau);
+      double quadratic=0.0;
+      PMatrix<double> grm_block;
+      for(size_t bi=0; bi<psi_in->GetNBlocks(); ++bi){
+        psi_in->GetBlock(bi,grm_block);
+        const size_t n = psi_in->GetBlockRows(bi);
+        const size_t offset = psi_in->GetBlockOffset(bi);
+        for(size_t a=0;a<n;++a){
+          const size_t ia=offset+a;
+          const double ya=G_tilde_in->GetVal(ia)*std::sqrt(ub_in->GetVal(ia));
+          for(size_t b=0;b<n;++b){
+            const size_t ib=offset+b;
+            const double yb=G_tilde_in->GetVal(ib)*std::sqrt(ub_in->GetVal(ib));
+            quadratic += ya*grm_block.GetVal(a,b)*yb;
+          }
+        }
+      }
+      vr_audit_record.block_proxy=(1.0-rho)*g_working_var+rho*quadratic;
+      vr_audit_record.ratio_block_proxy = vr_audit_record.block_proxy>0.0 ?
+          ugamma_var/vr_audit_record.block_proxy : 0.0;
+      if(vr_audit_record.algebra_error >
+         1e-8*std::max(1.0,std::fabs(ugamma_var)))
+        throw std::runtime_error("VR audit decomposition identity failed");
+      if(vr_audit_record.tau_decomposition_error >
+         1e-8*std::max(1.0,std::fabs(ugamma_var)))
+        throw std::runtime_error("Tau IF variance decomposition identity failed");
+    }
+#else
+    if(vr_audit_enabled)
+      throw std::runtime_error("--vr-audit-tsv is CPU-only");
+#endif
     if(use_var_ratio) ComputeVarRatio();
   }
-  // score stat and p-value for non-centralized case
-  if(ugamma == 0.0 && ugamma_var == 0.0) score_stat = 0.0;
-  else score_stat = ugamma  / sqrt(ugamma_var);
+  // Score statistic uses the original centered-G exact score.
+  // SPA keeps its G_tilde working CGF; under the fitted null, the two scores
+  // differ only by nuisance-score directions and should be numerically close.
+  if(!std::isfinite(ugamma) || !std::isfinite(ugamma_var) ||
+     ugamma_var < 0.0)
+    throw std::runtime_error("Non-finite or negative score variance");
+  if(ugamma_var == 0.0){
+    if(ugamma != 0.0)
+      throw std::runtime_error("Nonzero score with zero exact/VR variance");
+    score_stat = 0.0;
+  }else{
+    score_stat = ugamma / std::sqrt(ugamma_var);
+  }
 
-  // when the exact variance was used there is no variance ratio scaling
-  // for the saddlepoint routine to undo, so hand it 1.0
-  const double vr_use =
-    (use_var_ratio && vr_bin < var_ratio_found.size() &&
-     var_ratio_found[vr_bin]) ? vr_mean[vr_bin] : 1.0;
+  // The SPA CGF is built from residualized G and working weights W.
+  // Hence K''(0) = D = G_tilde' W G_tilde, while the final score
+  // variance is V = r * D. This scaling must also hold when the
+  // exact variance is used for a calibration SNP / exact fallback.
+  bool spa_supported = true;
+  double vr_use = 1.0;
+  if(!full_calc && use_var_ratio && vr_bin < var_ratio_found.size() &&
+     var_ratio_found[vr_bin]){
+    vr_use = vr_mean[vr_bin];
+  }else if(ugamma_var > 0.0){
+    const double working_var = g_working_var;
+    if(std::isfinite(working_var) && working_var > 0.0)
+      vr_use = ugamma_var / working_var;
+    else
+      spa_supported = false; // Cannot match CGF scale to exact variance.
+  }
+  spa_supported = spa_supported && std::isfinite(vr_use) && vr_use > 0.0;
 
-  // ComputeCGFs needs g_resid_coef, which only ComputeVarRatio fills
-  if(abs(score_stat) >= spa_thresh && !g_projection_ready)
-    ComputeVarRatio();
+  if(vr_diagnostics && print){
+    cout << "[SCORE_VARIANCE_SCALE] exact_path=" << full_calc
+         << " variance=" << Log4(ugamma_var) << " spa_ratio=" << Log4(vr_use)
+         << " spa_supported=" << spa_supported << endl;
+  }
 
-  if((abs(score_stat) < spa_thresh)){
-    pval = TMath::Prob(score_stat*score_stat, 1);
+  if(ugamma_var == 0.0 || abs(score_stat) < spa_thresh || !spa_supported){
+    pval = (ugamma_var == 0.0) ? 1.0 : TMath::Prob(score_stat*score_stat, 1);
   }else{
     pval = ComputeWeightedP(ugamma, ugamma_var, vr_use);
   }
-    
+
   // score stat and p-value for centralized case
 //   if(ugamma_cent == 0.0 && ugamma_var == 0.0) score_stat_cent = 0.0;
 //   else score_stat_cent = ugamma_cent / sqrt(ugamma_var);
@@ -3252,223 +4057,154 @@ void GHAModel::ComputeScoreTest(bool print){
 //     pval_cent = TMath::Prob(score_stat_cent*score_stat_cent, 1);
 //   else
 //     pval_cent = ComputePValue(ugamma_cent, ugamma_var, vr_use);
-  // print values and timing
+  // Keep the original internal timer; routine logs show only one compact
+  // SNP result line (the driver already reports the variant index).
   auto t1 = high_resolution_clock::now();
   size_t ns = duration_cast<nanoseconds>(t1-t0).count();
   ns_st += ns;
   if(print){
-    cout << ns * 1.0e-9 << " s" << endl
-	 << "p-value:         " << pval            << endl
-	 // << "p-value cent:    " << pval_cent       << endl
-	 << "score test:      " << score_stat      << endl
-	 // << "score test cent: " << score_stat_cent << endl
-	 << "Ugamma:          " << ugamma          << endl
-	 // << "Ugamma cent:     " << ugamma_cent     << endl
-	 << "Ugamma_var:      " << ugamma_var      << endl;
+    cout << "MAC=" << Log4(MAC)
+         << "; MAF=" << Log4(MAF)
+         << "; p-value=" << Log4(pval)
+         << "; score=" << Log4(score_stat)
+         << "; Ugamma=" << Log4(ugamma)
+         << "; Ugamma_var=" << Log4(ugamma_var)
+         << endl;
   }
   titer_ist_us["ComputeScoreTest"] += ns * 1e-3;
 }
 
 
 double GHAModel::ComputeVarRatio(){
-
   auto t0 = high_resolution_clock::now();
-
   const size_t bin = vr_bin;
-  const size_t q   = X_in->GetNCols() + 1;
 
+  // The centered genotype is used in the exact score and block variance.
+  // The same residualized G_tilde is used for this cheap working variance
+  // and the SPA CGF, preserving K''(0) = D.
+  BuildResidualizedG();
+  if(!g_tilde_ready)
+    throw std::runtime_error("Residualized genotype not available for variance ratio");
 
-  // ============================================================
-  // 1. working weights W_i = clambda_i * ebxw1_i
-  //
-  // independent of the SNP once the null model has been fit
-  // ============================================================
-
-  if(!vr_weights_ready){
-
-    if(ub_in == NULL || ub_in->GetNData() != nind){
-      if(ub_in) delete ub_in;
-      ub_in = new PMatrix<double>("ub_in", nind, 1);
-    }
-
-    for(size_t i=0; i<nind; i++)
-      ub_in->SetVal(i, clambda_in->GetVal(i) * ebxw1_in->GetVal(i));
-
-    vr_weights_ready = true;
-  }
-
-
-  // ============================================================
-  // 2. A = Xaug' W Xaug with Xaug = [1, X]
-  //
-  // built once, common to every SNP
-  // ============================================================
-
-  if(!residualizer_ready){
-
-    PMatrix<double>* A = new PMatrix<double>("XtWX_resid", q, q);
-    A->Zero();
-
-    for(size_t i=0; i<nind; i++){
-
-      const double wi = ub_in->GetVal(i);
-
-      for(size_t a=0; a<q; a++){
-
-        const double xa = (a == 0) ? 1.0 : X_in->GetVal(i, a-1);
-
-        for(size_t b=a; b<q; b++){
-
-          const double xb = (b == 0) ? 1.0 : X_in->GetVal(i, b-1);
-
-          A->SetVal(a, b, A->GetVal(a, b) + wi * xa * xb);
-        }
-      }
-    }
-
-    A->MakeSymmetric(true);
-
-    if(XtWX_inv_resid) delete XtWX_inv_resid;
-    XtWX_inv_resid = A->Inverse();
-    delete A;
-
-    if(G_tilde_in == NULL || G_tilde_in->GetNData() != nind){
-      if(G_tilde_in) delete G_tilde_in;
-      G_tilde_in = new PMatrix<double>("G_tilde_in", nind, 1);
-    }
-
-    residualizer_ready = true;
-
-    cout << "Prepared weighted genotype residualizer with "
-         << q << " nuisance columns." << endl;
-  }
-
-  // must be sized even if PrepareGResidualizer() ran first
-  if(g_resid_coef.size() != q) g_resid_coef.assign(q, 0.0);
-
-
-  // ============================================================
-  // 3. b = Xaug' W Gc and Gc' W Gc in one pass over subjects
-  //
-  // G_in has already been centred in SetG()
-  // ============================================================
-
-  vector<double> XtWG(q, 0.0);
-  double GtWG = 0.0;
-
-  for(size_t i=0; i<nind; i++){
-
-    const double wi = ub_in->GetVal(i);
-    const double gi = G_in->GetVal(i);
-
-    GtWG    += wi * gi * gi;
-    XtWG[0] += wi * gi;
-
-    for(size_t a=1; a<q; a++)
-      XtWG[a] += wi * X_in->GetVal(i, a-1) * gi;
-  }
-
-
-  // ============================================================
-  // 4. beta_G = A^{-1} b,  q is small
-  // ============================================================
-
-  for(size_t a=0; a<q; a++){
-
-    double tmp = 0.0;
-
-    for(size_t b=0; b<q; b++)
-      tmp += XtWX_inv_resid->GetVal(a, b) * XtWG[b];
-
-    g_resid_coef[a] = tmp;
-  }
-
-
-  // ============================================================
-  // 5. Gtilde' W Gtilde = Gc' W Gc - b' A^{-1} b
-  // ============================================================
-
-  double projection = 0.0;
-  for(size_t a=0; a<q; a++) projection += XtWG[a] * g_resid_coef[a];
-
-  const double GuG = GtWG - projection;
-
-  g_projection_ready = true;
-  g_tilde_ready      = false;
-
+  // Already computed directly and cached during residualization.
+  // Do not perform another O(n) pass for each genome-wide variant.
+  const double GuG = g_working_var;
   if(!std::isfinite(GuG) || GuG <= 1e-8){
-    auto t1 = high_resolution_clock::now();
-    titer_ist_us["ComputeVarRatio"] =
-      duration_cast<nanoseconds>(t1-t0).count() * 1.0e-3;
+    if(vr_diagnostics)
+      cerr << "VR working variance invalid: global calibration"
+           << " MAF=" << Log4(MAF) << " D=" << Log4(GuG) << endl;
     return 0.0;
   }
 
+  // ============================================================
+  // 6. Calibrate the one global variance ratio.
+  //    Only accepted, finite, positive marker-specific ratios count.
+  //    We MUST NOT recheck an unchanged median after an invalid marker.
+  // ============================================================
 
-  // ============================================================
-  // 6. update the estimate for THIS MAF bin only
-  //
-  // r = V_exact / (Gtilde' W Gtilde)
-  // ============================================================
+  // Exclude out-of-range MAFs from the calibration sample. Variants
+  // outside the specified calibration range may still be tested using
+  // whichever bin the upstream workflow assigns to them.
+  const bool calibration_maf_ok =
+    std::isfinite(MAF) &&
+    !vr_maf_edges.empty() &&
+    MAF >= vr_maf_edges.front() && MAF <= vr_maf_edges.back();
 
   if(use_var_ratio &&
      bin < var_ratio_found.size() &&
-     !var_ratio_found[bin]){
+     !var_ratio_found[bin] &&
+     calibration_maf_ok &&
+     std::isfinite(ugamma_var) && ugamma_var > 0.0){
 
-    if(std::isfinite(ugamma_var) && ugamma_var > 0.0){
-
-      const double r = ugamma_var / GuG;
-      if(std::isfinite(r) && r > 0.0) var_ratio[bin].push_back(r);
-
+    const double r = ugamma_var / GuG;
+    if(std::isfinite(r) && r > 0.0){
+      var_ratio[bin].push_back(r);
       const size_t n = var_ratio[bin].size();
 
+      if(vr_diagnostics){
+        cout << "VR marker: bin=" << bin
+             << " accepted=" << n
+             << " MAF=" << Log4(MAF) << " MAC=" << Log4(MAC)
+             << " exact=" << Log4(ugamma_var)
+             << " working=" << Log4(GuG)
+             << " ratio=" << Log4(r) << endl;
+      }
+
+      const size_t initial = std::max<size_t>(1, vr_init_eval);
+      const size_t step = std::max<size_t>(1, vr_step_eval);
+      const size_t maximum = std::max(initial, vr_max_eval);
+      const size_t required = std::max<size_t>(1, vr_stable_checks);
       const bool evaluate_ratio =
-        (n <= vr_init_eval)
-          ? (n == vr_init_eval)
-          : ((n - vr_init_eval) % vr_step_eval == 0);
+        (n == initial) ||
+        (n > initial && ((n - initial) % step == 0));
 
-      if(n > 0 && evaluate_ratio){
+      if(evaluate_ratio){
+        vector<double> sorted = var_ratio[bin];
+        sort(sorted.begin(), sorted.end());
+        const size_t m = sorted.size();
+        const double med = (m % 2 == 0)
+          ? 0.5 * (sorted[m/2-1] + sorted[m/2]) : sorted[m/2];
+        const double q25 = sorted[m/4];
+        const double q75 = sorted[(3*m)/4];
 
-        vector<double> vr_copy = var_ratio[bin];
-        sort(vr_copy.begin(), vr_copy.end());
-
-        const size_t m = vr_copy.size();
-        const double med =
-          (m % 2 == 0) ? 0.5 * (vr_copy[m/2 - 1] + vr_copy[m/2])
-                       : vr_copy[m/2];
-
-        cout << "checking variance ratio for MAF bin " << bin
-             << " (" << vr_maf_edges[bin]
-             << ", "  << vr_maf_edges[bin+1]
-             << "] after " << n << " exact evaluations..."
-             << " median = " << med << endl;
-
-        // only test convergence once a previous median exists
+        double rel_change = numeric_limits<double>::quiet_NaN();
         if(std::isfinite(vr_prev[bin])){
-
-          const double rel_change =
-            std::abs(med - vr_prev[bin]) /
+          rel_change = std::abs(med - vr_prev[bin]) /
             std::max(1e-12, std::abs(vr_prev[bin]));
-
-          if(rel_change < vr_epsilon){
-
-            var_ratio_found[bin] = true;
-            vr_mean[bin]         = std::min(med, 10.0);
-
-            cout << "found acceptable variance ratio for MAF bin " << bin
-                 << ", rhat = " << vr_mean[bin] << endl;
-
-            // the caches are shared, only drop them once every bin is done
-            if(AllVarRatioFound()){
-              for(auto s : Stheta_cache) if(s) delete s;
-              for(auto I : Igamma_cache) if(I) delete I;
-              Stheta_cache.clear();
-              Igamma_cache.clear();
-            }
-          }
         }
 
+        // First median at n=initial is the reference; after that,
+        // require two successive stable updates. No fixed minimum
+        // marker count beyond the initial checkpoint is imposed.
+        if(std::isfinite(rel_change) && rel_change < vr_epsilon)
+          ++vr_stable_count[bin];
+        else
+          vr_stable_count[bin] = 0;
+
+        cout << "Global VR calibration [" << Log4(vr_maf_edges.front())
+             << "," << Log4(vr_maf_edges.back()) << "]"
+             << " median=" << Log4(med)
+             << " IQR=[" << Log4(q25) << ", " << Log4(q75) << "]"
+             << " rel_change=" << Log4(rel_change)
+             << " stable=" << vr_stable_count[bin]
+             << "/" << required << endl;
+
         vr_prev[bin] = med;
+
+        if(vr_stable_count[bin] >= required){
+          // Do not silently truncate large estimates (the original
+          // std::min(med, 10.0) hid potentially unstable calibrations).
+          vr_mean[bin] = med;
+          var_ratio_found[bin] = true;
+          if(med > 10.0)
+            cerr << "WARNING: large converged global variance ratio: rhat=" << Log4(med)
+                 << ". Check numerator/denominator and marker QC." << endl;
+          cout << "Global VR converged: rhat=" << Log4(med) << endl;
+
+          // Release exact-variance caches once the global ratio converges.
+          if(AllVarRatioFound()){
+            for(auto s : Stheta_cache) if(s) delete s;
+            for(auto I : Igamma_cache) if(I) delete I;
+            Stheta_cache.clear();
+            Igamma_cache.clear();
+          }
+        }else if(n >= maximum){
+          // Fail closed rather than using an unreliable bin-specific ratio.
+          ostringstream msg;
+          msg << "Variance-ratio calibration did not converge for MAF bin "
+              << bin << " after " << n << " valid markers"
+              << " (median=" << med << ", stable_checks="
+              << vr_stable_count[bin] << "/" << required
+              << "). Inspect QC, denominator, and calibration pool. "
+              << "Adjust VR limits only after inspecting diagnostics.";
+          throw runtime_error(msg.str());
+        }
       }
+    }else if(vr_diagnostics){
+      cerr << "VR marker rejected: bin=" << bin
+           << " MAF=" << Log4(MAF) << " MAC=" << Log4(MAC)
+           << " exact=" << Log4(ugamma_var)
+           << " working=" << Log4(GuG) << " ratio=" << Log4(r) << endl;
     }
   }
 
@@ -3833,72 +4569,11 @@ void GHAModel::ComputeCGFs(
     double& k2
 ){
 
-  // ============================================================
-  // Build residualized genotype only ONCE per variant
-  //
-  // Gtilde =
-  //
-  // Gc -
-  // Xaug (Xaug' W Xaug)^(-1) Xaug' W Gc
-  //
-  // g_resid_coef was already computed in ComputeVarRatio().
-  // ============================================================
-
-  if(!g_tilde_ready){
-
-    if(
-        !residualizer_ready ||
-        !g_projection_ready
-    ){
-
-      cerr
-          << "ERROR: residualized genotype coefficients "
-          << "were not prepared before ComputeCGFs()."
-          << endl;
-
-      k0 = 0.0;
-      k1 = 0.0;
-      k2 = 0.0;
-
-      return;
-    }
-
-
-    const size_t q =
-        X_in->GetNCols() + 1;
-
-
-    for(size_t i=0; i<nind; i++){
-
-      // intercept term
-      double fitted =
-          g_resid_coef[0];
-
-
-      // covariate terms
-      for(size_t a=1; a<q; a++){
-
-        fitted +=
-            X_in->GetVal(
-                i,
-                a - 1
-            ) *
-            g_resid_coef[a];
-      }
-
-
-      G_tilde_in->SetVal(
-          i,
-          G_in->GetVal(i) -
-          fitted
-      );
-    }
-
-
-    g_tilde_ready =
-        true;
-  }
-
+  // SPA/VR working approximation uses cached G_tilde.
+  // The exact score itself remains defined on centered G_in.
+  BuildResidualizedG();
+  if(!g_tilde_ready)
+    throw std::runtime_error("SPA requested without residualized genotype");
 
   // ============================================================
   // CGF
